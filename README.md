@@ -18,48 +18,53 @@ It is designed to sit behind an [Eclipse Dataspace Connector (EDC)](https://gith
 8. [Communication flow](#communication-flow)
 9. [Writing a custom BPMN process](#writing-a-custom-bpmn-process)
 
+**Examples**
+- [Example 1 — Invoicing system](docs/how-it-works-example1.md)
+
 ---
 
 ## Architecture overview
 
 ```
-                    ┌──────────────────────────────────────────────────────────┐
-                    │                    EDC Dataspace                         │
-  ┌────────────┐    │  ┌──────────────┐          ┌──────────────┐              │
-  │            │    │  │ P1 Control   │◄─ DSP ──►│ P2 Control   │              │
-  │  P2 app /  │    │  │    Plane     │           │    Plane     │             │
-  │  consumer  │    │  └──────┬───────┘           └──────┬───────┘             │
-  │            │    │         │                          │                     │
-  └─────┬──────┘    │  ┌──────▼───────┐           ┌──────▼───────┐             │
-        │           │  │  P1 Data     │           │  P2 Data     │             │
-        │           │  │    Plane     │           │    Plane     │             │
-        │           │  └──────┬───────┘           └──────┬───────┘             │
-        │           └─────────┼──────────────────────────┼─────────────────────┘
-        │  EDR (pull)         │                          │ (future push-back)
-        └─────────────────────▼                          │
-                       ┌──────────────┐                  │
-                       │  P1 Process  │                  │
-                       │   Service    │◄─── direct ──────┘
-                       │  :8080       │     callback
-                       └──────┬───────┘     from P1
-                              │             internal app
-                       ┌──────▼───────┐
-                       │   Flowable   │
-                       │  BPMN engine │
-                       └──────┬───────┘
-                              │
-                       ┌──────▼───────┐
-                       │  P1 internal │
-                       │     app      │  ◄── ServiceTask POSTs here
-                       └──────────────┘
+┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
+│           Participant 1              │     │           Participant 2              │
+│                                      │     │                                      │
+│  ┌─────────────┐  ┌───────────────┐  │     │  ┌─────────────┐  ┌───────────────┐  │
+│  │ Control     │  │  Data         │  │     │  │ Control     │  │  Data         │  │
+│  │ Plane       │  │  Plane        │  │     │  │ Plane       │  │  Plane        │  │
+│  │ :19193      │  │  :38185/public│  │     │  │ :29193      │  │  :48185/public│  │
+│  └──────┬──────┘  └──────┬────────┘  │     │  └──────┬──────┘  └──────┬────────┘  │
+│         │  DSP            │ proxy     │     │         │  DSP            │ proxy     │
+│         └────────────┐   │           │     │         └────────────┐   │           │
+│                      │   │           │     │                      │   │           │
+│  ┌───────────────────▼───▼────────┐  │     │  ┌───────────────────▼───▼────────┐  │
+│  │        Process Service         │  │     │  │        Process Service         │  │
+│  │  p1-process-service:8080       │  │     │  │  p2-process-service:8080       │  │
+│  │  ┌──────────────────────────┐  │  │     │  │  ┌──────────────────────────┐  │  │
+│  │  │   Flowable BPMN engine   │  │  │     │  │  │   Flowable BPMN engine   │  │  │
+│  │  └────────────┬─────────────┘  │  │     │  │  └────────────┬─────────────┘  │  │
+│  └───────────────┼────────────────┘  │     │  └───────────────┼────────────────┘  │
+│                  │ ServiceTask POST   │     │                  │ ServiceTask POST   │
+│  ┌───────────────▼────────────────┐  │     │  ┌───────────────▼────────────────┐  │
+│  │       P1 Internal App          │  │     │  │       P2 Internal App          │  │
+│  │   (internalApiUrl target)      │  │     │  │   (internalApiUrl target)      │  │
+│  └────────────────────────────────┘  │     │  └────────────────────────────────┘  │
+└──────────────────────────────────────┘     └──────────────────────────────────────┘
+              │  DSP protocol (contract negotiation)  │
+              └───────────────────────────────────────┘
+
+P2 accesses P1's process service:   P2 data-plane ──EDR proxy──► p1-process-service:8080
+P1 accesses P2's process service:   P1 data-plane ──EDR proxy──► p2-process-service:8080
 ```
 
 Key points:
 
+- **Both participants run their own process service.** `p1-process-service` and `p2-process-service` are identical deployments of the same image. Each participant owns and governs their own service instances independently.
+- **Cross-party access goes through EDC.** P2 accesses P1's service instances via P1's EDC data-plane (and vice versa). The data-plane enforces the contract policy and issues short-lived EDR tokens for each transfer.
 - **Service instance = BPMN process instance.** Starting a service instance starts a BPMN process. PATCHing it advances the workflow (completes a `userTask` or triggers a `receiveTask`).
 - **UUID as business key.** The public API uses a `format: uuid` identifier. Flowable's own numeric process ID is an internal detail; the UUID is stored as the Flowable `businessKey`.
 - **Process variables carry state.** The fields `_state`, `_stakeholders`, and `_version` are stored as Flowable process variables prefixed with `_`. All other variables are surfaced as the `parameters` map in the API response.
-- **EDC proxy forwards HTTP.** The EDC data-plane acts as an authenticated HTTP proxy. Consumers use a short-lived EDR token to call the process service through the data-plane's public endpoint.
+- **EDC proxy forwards HTTP.** The EDC data-plane acts as an authenticated HTTP proxy. Consumers use a short-lived EDR token to call the remote process service through the data-plane's public endpoint.
 
 ---
 
