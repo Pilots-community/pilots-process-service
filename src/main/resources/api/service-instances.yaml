@@ -1,0 +1,850 @@
+openapi: 3.0.3
+info:
+  title: Process Sharing Service - Service Instance API
+  version: 1.0.0
+  description: |
+    Process-agnostic, BPMN-inspired, event-oriented API for managing service instances.
+
+    A service instance references an arbitrary service/process definition. The API therefore
+    does not prescribe a fixed lifecycle vocabulary for `state`.
+
+    Concurrency control uses HTTP ETag and If-Match:
+    - Resource responses expose an `ETag` header.
+    - `PUT`, `PATCH`, and `DELETE` require `If-Match`.
+    - Requests with mismatched entity tags fail with `412 Precondition Failed`.
+
+servers:
+  - url: https://api.example.com
+
+tags:
+  - name: Service Instances
+    description: Manage process-oriented service instances
+
+security:
+  - bearerAuth: []
+
+paths:
+  /serviceInstances:
+    post:
+      tags:
+        - Service Instances
+      summary: Create a service instance
+      operationId: createServiceInstance
+      description: |
+        Creates a new service instance.
+
+        The server generates `id`, `version`, `createdAt`, `updatedAt`, and event metadata.
+        `state` is optional at creation time. If omitted, the server determines the initial state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceInstanceCreate'
+      responses:
+        '201':
+          description: Service instance created
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInstance'
+        '400':
+          $ref: '#/components/responses/BadRequestProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityProblem'
+        '500':
+          $ref: '#/components/responses/InternalServerErrorProblem'
+
+    get:
+      tags:
+        - Service Instances
+      summary: List service instances
+      operationId: listServiceInstances
+      description: |
+        Returns a paginated list of service instances matching the provided filters.
+
+        Filtering semantics:
+        - Attribute filters are combined with logical AND.
+        - `parameterKey` and `parameterValue` are used together for exact key/value matching
+          inside `parameters`; supplying only one of them is invalid.
+        - If both `stakeholderRole` and `stakeholderParty` are provided, both must match
+          the same stakeholder entry.
+      parameters:
+        - $ref: '#/components/parameters/serviceDefinition'
+        - $ref: '#/components/parameters/serviceOffering'
+        - $ref: '#/components/parameters/serviceQuotation'
+        - $ref: '#/components/parameters/state'
+        - $ref: '#/components/parameters/stakeholderRole'
+        - $ref: '#/components/parameters/stakeholderParty'
+        - $ref: '#/components/parameters/createdAfter'
+        - $ref: '#/components/parameters/createdBefore'
+        - $ref: '#/components/parameters/updatedAfter'
+        - $ref: '#/components/parameters/updatedBefore'
+        - $ref: '#/components/parameters/lastEventType'
+        - $ref: '#/components/parameters/parameterKey'
+        - $ref: '#/components/parameters/parameterValue'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: List of matching service instances
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInstanceCollection'
+        '400':
+          $ref: '#/components/responses/BadRequestProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+        '500':
+          $ref: '#/components/responses/InternalServerErrorProblem'
+
+  /serviceInstances/{serviceInstanceId}:
+    get:
+      tags:
+        - Service Instances
+      summary: Get a service instance by ID
+      operationId: getServiceInstance
+      parameters:
+        - $ref: '#/components/parameters/serviceInstanceId'
+      responses:
+        '200':
+          description: Service instance found
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInstance'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+        '500':
+          $ref: '#/components/responses/InternalServerErrorProblem'
+
+    put:
+      tags:
+        - Service Instances
+      summary: Replace a service instance
+      operationId: replaceServiceInstance
+      description: |
+        Performs full replacement of writable fields for a service instance.
+
+        Omitted writable fields are treated as intentional omission and may be reset/cleared
+        by server rules. Server-managed fields are never client-writable.
+
+        This operation requires `If-Match` for optimistic concurrency control.
+      parameters:
+        - $ref: '#/components/parameters/serviceInstanceId'
+        - $ref: '#/components/parameters/ifMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceInstanceReplace'
+      responses:
+        '200':
+          description: Service instance replaced
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInstance'
+        '400':
+          $ref: '#/components/responses/BadRequestProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedProblem'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredProblem'
+        '500':
+          $ref: '#/components/responses/InternalServerErrorProblem'
+
+    patch:
+      tags:
+        - Service Instances
+      summary: Partially update a service instance
+      operationId: patchServiceInstance
+      description: |
+        Applies partial update semantics using a partial resource representation
+        (not JSON Patch):
+        - only provided fields are overwritten
+        - omitted fields remain unchanged
+
+        This operation requires `If-Match` for optimistic concurrency control.
+      parameters:
+        - $ref: '#/components/parameters/serviceInstanceId'
+        - $ref: '#/components/parameters/ifMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceInstancePatch'
+      responses:
+        '200':
+          description: Service instance updated
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInstance'
+        '400':
+          $ref: '#/components/responses/BadRequestProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedProblem'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredProblem'
+        '500':
+          $ref: '#/components/responses/InternalServerErrorProblem'
+
+    delete:
+      tags:
+        - Service Instances
+      summary: Delete a service instance
+      operationId: deleteServiceInstance
+      description: |
+        Deletes the identified service instance.
+
+        The implementation may perform hard delete or soft delete internally.
+        From the API perspective, the resource is considered deleted after successful completion.
+
+        This operation requires `If-Match` for optimistic concurrency control.
+      parameters:
+        - $ref: '#/components/parameters/serviceInstanceId'
+        - $ref: '#/components/parameters/ifMatch'
+      responses:
+        '204':
+          description: Service instance deleted
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedProblem'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredProblem'
+        '500':
+          $ref: '#/components/responses/InternalServerErrorProblem'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  headers:
+    ETag:
+      description: Entity tag representing the current resource version
+      schema:
+        type: string
+    Location:
+      description: URI of the created service instance
+      schema:
+        type: string
+        format: uri
+
+  parameters:
+    serviceInstanceId:
+      name: serviceInstanceId
+      in: path
+      required: true
+      description: Server-generated UUID of the service instance
+      schema:
+        type: string
+        format: uuid
+
+    ifMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: |
+        Required ETag precondition for optimistic concurrency control.
+
+        The request is processed only if the provided ETag matches the current
+        representation of the resource.
+      schema:
+        type: string
+
+    serviceDefinition:
+      name: serviceDefinition
+      in: query
+      required: false
+      description: Filter by service definition URI
+      schema:
+        $ref: '#/components/schemas/ServiceDefinitionUri'
+
+    serviceOffering:
+      name: serviceOffering
+      in: query
+      required: false
+      description: Filter by service offering URI
+      schema:
+        $ref: '#/components/schemas/ServiceOfferingUri'
+
+    serviceQuotation:
+      name: serviceQuotation
+      in: query
+      required: false
+      description: Filter by service quotation URI
+      schema:
+        $ref: '#/components/schemas/ServiceQuotationUri'
+
+    state:
+      name: state
+      in: query
+      required: false
+      description: Filter by current process-specific state
+      schema:
+        $ref: '#/components/schemas/ServiceState'
+
+    stakeholderRole:
+      name: stakeholderRole
+      in: query
+      required: false
+      description: Filter by stakeholder role
+      schema:
+        $ref: '#/components/schemas/StakeholderRole'
+
+    stakeholderParty:
+      name: stakeholderParty
+      in: query
+      required: false
+      description: Filter by stakeholder party identifier
+      schema:
+        type: string
+
+    createdAfter:
+      name: createdAfter
+      in: query
+      required: false
+      description: Return instances created strictly after this timestamp
+      schema:
+        type: string
+        format: date-time
+
+    createdBefore:
+      name: createdBefore
+      in: query
+      required: false
+      description: Return instances created strictly before this timestamp
+      schema:
+        type: string
+        format: date-time
+
+    updatedAfter:
+      name: updatedAfter
+      in: query
+      required: false
+      description: Return instances updated strictly after this timestamp
+      schema:
+        type: string
+        format: date-time
+
+    updatedBefore:
+      name: updatedBefore
+      in: query
+      required: false
+      description: Return instances updated strictly before this timestamp
+      schema:
+        type: string
+        format: date-time
+
+    lastEventType:
+      name: lastEventType
+      in: query
+      required: false
+      description: Filter by the type of the last observed event
+      schema:
+        $ref: '#/components/schemas/LastEventType'
+
+    parameterKey:
+      name: parameterKey
+      in: query
+      required: false
+      description: Parameter key for key/value filtering inside `parameters`
+      schema:
+        type: string
+
+    parameterValue:
+      name: parameterValue
+      in: query
+      required: false
+      description: |
+        Parameter value used with `parameterKey` for exact key/value matching
+        inside `parameters`
+      schema:
+        type: string
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 50
+
+    offset:
+      name: offset
+      in: query
+      required: false
+      description: Zero-based offset into the result set
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  responses:
+    BadRequestProblem:
+      description: Bad request
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    UnauthorizedProblem:
+      description: Authentication required or invalid credentials
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    ForbiddenProblem:
+      description: Authenticated but not authorized
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    NotFoundProblem:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    ConflictProblem:
+      description: Request conflicts with current resource state
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    PreconditionFailedProblem:
+      description: ETag mismatch or failed precondition
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    PreconditionRequiredProblem:
+      description: Missing required precondition header such as If-Match
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    UnprocessableEntityProblem:
+      description: Semantic validation failed
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    InternalServerErrorProblem:
+      description: Internal server error
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+    ServiceInstance:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - serviceDefinition
+        - stakeholders
+        - parameters
+        - state
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: Server-generated identifier of the service instance
+        serviceDefinition:
+          $ref: '#/components/schemas/ServiceDefinitionUri'
+        stakeholders:
+          $ref: '#/components/schemas/Stakeholders'
+        serviceOffering:
+          $ref: '#/components/schemas/ServiceOfferingUriNullable'
+        serviceQuotation:
+          $ref: '#/components/schemas/ServiceQuotationUriNullable'
+        parameters:
+          $ref: '#/components/schemas/OpenParameters'
+        payload:
+          $ref: '#/components/schemas/PayloadNullable'
+        payloadMimeType:
+          $ref: '#/components/schemas/PayloadMimeTypeNullable'
+        state:
+          $ref: '#/components/schemas/ServiceState'
+        version:
+          type: integer
+          minimum: 1
+          readOnly: true
+          description: Monotonically increasing resource version
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the instance was created
+        updatedAt:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the instance was last updated
+        lastEventType:
+          allOf:
+            - $ref: '#/components/schemas/LastEventTypeNullable'
+          readOnly: true
+          description: Type of the most recently observed event affecting the instance
+        lastEventAt:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: Timestamp of the most recently observed event affecting the instance
+        eventCount:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: Number of events observed for this instance
+
+    ServiceInstanceCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - serviceDefinition
+        - stakeholders
+        - parameters
+      properties:
+        serviceDefinition:
+          $ref: '#/components/schemas/ServiceDefinitionUri'
+        stakeholders:
+          $ref: '#/components/schemas/Stakeholders'
+        serviceOffering:
+          $ref: '#/components/schemas/ServiceOfferingUriNullable'
+        serviceQuotation:
+          $ref: '#/components/schemas/ServiceQuotationUriNullable'
+        parameters:
+          $ref: '#/components/schemas/OpenParameters'
+        payload:
+          $ref: '#/components/schemas/PayloadNullable'
+        payloadMimeType:
+          $ref: '#/components/schemas/PayloadMimeTypeNullable'
+        state:
+          $ref: '#/components/schemas/ServiceState'
+      description: |
+        Payload for creating a service instance.
+
+        The server generates `id`, `version`, `createdAt`, `updatedAt`, and event metadata.
+        `payloadMimeType` should be provided when `payload` is provided.
+
+    ServiceInstanceReplace:
+      type: object
+      additionalProperties: false
+      required:
+        - serviceDefinition
+        - stakeholders
+        - parameters
+        - state
+      properties:
+        serviceDefinition:
+          $ref: '#/components/schemas/ServiceDefinitionUri'
+        stakeholders:
+          $ref: '#/components/schemas/Stakeholders'
+        serviceOffering:
+          $ref: '#/components/schemas/ServiceOfferingUriNullable'
+        serviceQuotation:
+          $ref: '#/components/schemas/ServiceQuotationUriNullable'
+        parameters:
+          $ref: '#/components/schemas/OpenParameters'
+        payload:
+          $ref: '#/components/schemas/PayloadNullable'
+        payloadMimeType:
+          $ref: '#/components/schemas/PayloadMimeTypeNullable'
+        state:
+          $ref: '#/components/schemas/ServiceState'
+      description: |
+        Full replacement payload for writable fields of a service instance.
+
+        Server-managed fields (`id`, `version`, `createdAt`, `updatedAt`, and event metadata)
+        are not writable and are excluded from this schema.
+
+        `payloadMimeType` should be provided when `payload` is provided.
+
+    ServiceInstancePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        serviceDefinition:
+          $ref: '#/components/schemas/ServiceDefinitionUri'
+        stakeholders:
+          $ref: '#/components/schemas/Stakeholders'
+        serviceOffering:
+          $ref: '#/components/schemas/ServiceOfferingUriNullable'
+        serviceQuotation:
+          $ref: '#/components/schemas/ServiceQuotationUriNullable'
+        parameters:
+          $ref: '#/components/schemas/OpenParameters'
+        payload:
+          $ref: '#/components/schemas/PayloadNullable'
+        payloadMimeType:
+          $ref: '#/components/schemas/PayloadMimeTypeNullable'
+        state:
+          $ref: '#/components/schemas/ServiceState'
+      description: |
+        Partial update payload for writable fields of a service instance.
+
+        Only provided fields are overwritten. Fields not present remain unchanged.
+        `payloadMimeType` should be provided when `payload` is provided.
+
+    ServiceInstanceCollection:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - count
+        - limit
+        - offset
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceInstance'
+        count:
+          type: integer
+          minimum: 0
+          description: Number of items returned in this page
+        total:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Total number of matching items if computed by the implementation
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
+        offset:
+          type: integer
+          minimum: 0
+
+    Stakeholder:
+      type: object
+      additionalProperties: false
+      required:
+        - role
+        - party
+      properties:
+        role:
+          $ref: '#/components/schemas/StakeholderRole'
+        party:
+          type: string
+          description: |
+            Identifier of the stakeholder party.
+            This may be a DID, URI, legal entity identifier, participant identifier,
+            or another ecosystem-specific identifier.
+        displayName:
+          type: string
+          nullable: true
+          description: Human-readable label for the stakeholder party
+
+    StakeholderRole:
+      type: string
+      description: Semantically defined stakeholder role
+      enum:
+        - customer
+        - supplier
+        - notifiedParty
+        - delegate
+        - operator
+        - requester
+        - provider
+        - consignee
+        - consignor
+        - carrier
+        - shipper
+        - receiver
+
+    ServiceDefinitionUri:
+      type: string
+      format: uri
+      description: URI identifying the governing service definition
+
+    ServiceOfferingUri:
+      type: string
+      format: uri
+      description: URI identifying the service offering
+
+    ServiceOfferingUriNullable:
+      allOf:
+        - $ref: '#/components/schemas/ServiceOfferingUri'
+      nullable: true
+
+    ServiceQuotationUri:
+      type: string
+      format: uri
+      description: URI identifying the service quotation
+
+    ServiceQuotationUriNullable:
+      allOf:
+        - $ref: '#/components/schemas/ServiceQuotationUri'
+      nullable: true
+
+    ServiceState:
+      type: string
+      description: |
+        Current process-specific state of the service instance.
+
+        This API does not prescribe a fixed state vocabulary. Values are defined by
+        the referenced service definition and related process model.
+
+        The value should be a stable machine-readable symbolic identifier.
+
+    Stakeholders:
+      type: array
+      minItems: 1
+      description: Parties involved in the service instance with semantically defined roles
+      items:
+        $ref: '#/components/schemas/Stakeholder'
+
+    OpenParameters:
+      type: object
+      description: Open set of instance parameters
+      additionalProperties: true
+
+    Payload:
+      type: string
+      format: byte
+      description: Optional opaque payload encoded as Base64
+
+    PayloadNullable:
+      allOf:
+        - $ref: '#/components/schemas/Payload'
+      nullable: true
+
+    PayloadMimeType:
+      type: string
+      description: MIME type describing the decoded payload content
+
+    PayloadMimeTypeNullable:
+      allOf:
+        - $ref: '#/components/schemas/PayloadMimeType'
+      nullable: true
+
+    LastEventType:
+      type: string
+      description: Type of the most recently observed event affecting the instance
+
+    LastEventTypeNullable:
+      allOf:
+        - $ref: '#/components/schemas/LastEventType'
+      nullable: true
+
+    ProblemDetails:
+      type: object
+      additionalProperties: true
+      required:
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          format: uri
+          default: about:blank
+          description: URI reference identifying the problem type
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          description: HTTP status code generated for this occurrence
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence
+        instance:
+          type: string
+          format: uri
+          description: URI reference identifying this specific problem occurrence
+        code:
+          type: string
+          description: Application-specific error code
+        errors:
+          type: array
+          description: Optional validation or field-level issues
+          items:
+            $ref: '#/components/schemas/ProblemViolation'
+
+    ProblemViolation:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: Name of the offending field or parameter
+        reason:
+          type: string
+          description: Human-readable explanation of the issue

@@ -1,0 +1,8 @@
+build/classes/
+build/generated/
+build/reports/
+build/tmp/
+.gradle/
+.git/
+*.md
+src/

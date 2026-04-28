@@ -1,0 +1,43 @@
+# Two pilots-process-service instances — one per dataspace participant.
+#
+# Both containers join the pilots-dataspace Docker network so the EDC
+# data-plane containers can reach them by hostname:
+#   http://p1-process-service:8080/serviceInstances
+#   http://p2-process-service:8080/serviceInstances
+#
+# Usage:
+#   # 1. Start pilots-dataspace first (creates the network)
+#   cd ../pilots-dataspace && docker compose up -d
+#
+#   # 2. Build and start both process service instances
+#   cd ../pilots-process-service && docker compose up -d --build
+#
+#   # 3. Register both as EDC assets
+#   ./register-edc-asset.sh
+#
+# The default network name assumes the pilots-dataspace compose project is
+# named "pilots-dataspace" (i.e. its directory is named pilots-dataspace).
+# Override with:  DATASPACE_NETWORK=my-network docker compose up -d
+
+services:
+
+  p1-process-service:
+    build: .
+    container_name: p1-process-service
+    ports:
+      - "8080:8080"     # also reachable from host at localhost:8080
+    networks:
+      - dataspace
+
+  p2-process-service:
+    build: .
+    container_name: p2-process-service
+    ports:
+      - "8081:8080"     # host port 8081 → container port 8080
+    networks:
+      - dataspace
+
+networks:
+  dataspace:
+    external: true
+    name: ${DATASPACE_NETWORK:-pilots-dataspace_default}

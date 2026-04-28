@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample Service Mediator Process
+  Process ID : sample-service-process
+  Auto-deployed by Flowable on startup from src/main/resources/processes/
+
+  Flow:
+    Start Event
+      -> Service Task "Notify Internal App"   (InvokeInternalApiDelegate via delegateExpression)
+      -> Receive Task "Wait for Internal App Reply"  (pauses; resumed via runtimeService.trigger)
+      -> End Event
+
+  Delegate note:
+    flowable:delegateExpression="${invokeInternalApiDelegate}" is used instead of
+    flowable:class because InvokeInternalApiDelegate is a Spring @Component with
+    constructor-injected dependencies.  flowable:class bypasses Spring and would
+    fail to construct the bean.
+
+  Receive task note:
+    A receiveTask does not appear in taskService.createTaskQuery().
+    Resume it with: runtimeService.trigger(executionId)
+    where executionId comes from:
+      runtimeService.createExecutionQuery()
+        .processInstanceId(flowableProcessId)
+        .activityId("waitForInternalAppReply")
+        .singleResult()
+
+  Required process variables at start:
+    internalApiUrl  (String) - URL the service task will POST to
+    payloadData     (String) - JSON body forwarded to the internal application
+-->
+<definitions
+        xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:flowable="http://flowable.org/bpmn"
+        targetNamespace="http://www.flowable.org/processdef">
+
+    <process id="sample-service-process"
+             name="Sample Service Mediator Process"
+             isExecutable="true">
+
+        <startEvent id="startEvent" name="Start"/>
+        <sequenceFlow id="flow1" sourceRef="startEvent" targetRef="notifyInternalApp"/>
+
+        <serviceTask id="notifyInternalApp"
+                     name="Notify Internal App"
+                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
+        <sequenceFlow id="flow2" sourceRef="notifyInternalApp" targetRef="waitForInternalAppReply"/>
+
+        <receiveTask id="waitForInternalAppReply"
+                     name="Wait for Internal App Reply"/>
+        <sequenceFlow id="flow3" sourceRef="waitForInternalAppReply" targetRef="endEvent"/>
+
+        <endEvent id="endEvent" name="End"/>
+
+    </process>
+
+</definitions>
