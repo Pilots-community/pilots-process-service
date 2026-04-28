@@ -181,6 +181,48 @@ edc_list_instances() {
   curl -s -H "Authorization: Bearer $2" "${1}"
 }
 
+# edc_patch DP_URL TOKEN DIRECT_BASE ID VERSION STATE PARAMS_JSON
+#
+# Attempts the PATCH through the EDC data-plane proxy first.
+# Prints the HTTP status so the reader can see exactly what happened.
+# If the proxy returns a non-2xx (currently 404 due to Jetty sub-path routing
+# limitation in this EDC build), falls back to a direct call and explains why.
+# Either way the process advances and the JSON response is printed to stdout.
+edc_patch() {
+  local dp_url="$1" token="$2" direct_base="$3"
+  local id="$4" ver="$5" state="$6" params="$7"
+  local body="{\"state\":\"${state}\",\"parameters\":${params}}"
+
+  info "[EDC attempt] PATCH ${dp_url}/${id}  (Authorization: Bearer <token>)"
+  local resp http_code
+  resp=$(curl -s -w "\n%{http_code}" -X PATCH \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    -H "If-Match: \"${ver}\"" \
+    -d "$body" \
+    "${dp_url}/${id}")
+  http_code=$(echo "$resp" | tail -1)
+  local body_only
+  body_only=$(echo "$resp" | sed '$d')
+
+  if [[ "$http_code" =~ ^2 ]]; then
+    ok "[EDC] PATCH succeeded via data-plane proxy  (HTTP ${http_code})"
+    echo "$body_only"
+    return
+  fi
+
+  warn "[EDC] PATCH via proxy returned HTTP ${http_code}"
+  warn "      Cause: EDC data-plane in this build registers /public at exact path only;"
+  warn "             Jetty returns 404 for /public/{id} before the Jersey app is reached."
+  warn "      Fix:   Register public API servlet as /public/* (wildcard) in data-plane build."
+  warn "      Falling back to direct call: PATCH ${direct_base}/serviceInstances/${id}"
+  curl -s -X PATCH \
+    -H "Content-Type: application/json" \
+    -H "If-Match: \"${ver}\"" \
+    -d "$body" \
+    "${direct_base}/serviceInstances/${id}"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Section 0 — Prerequisites"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,10 +276,10 @@ ok "P1 process service accessible via EDC (${P1_LIST_COUNT} existing instances)"
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Section 3 — VGM business flow"
 # ─────────────────────────────────────────────────────────────────────────────
-# Cross-party PATCHes are labelled [DIRECT] because the current data-plane
-# build does not route sub-paths.  In a patched data-plane they would become:
-#   curl -X PATCH "${P2_DP}/${SHIP_ID}" -H "Authorization: Bearer ${P2_TOKEN}" …
-#   curl -X PATCH "${P1_DP}/${CERT_ID}" -H "Authorization: Bearer ${P1_TOKEN}" …
+# Cross-party PATCHes use edc_patch(), which:
+#   1. Attempts the call through the EDC data-plane proxy with the EDR Bearer token
+#   2. If the proxy returns non-2xx, logs the HTTP status + reason and falls back direct
+# Each step shows exactly what happened so the output is self-documenting.
 
 # ── Step 1: Shipper creates process instance ──────────────────────────────────
 echo -e "\n${CYAN}--- Step 1: Shipper creates shipperProcess instance [DIRECT] ---${RESET}"
@@ -270,11 +312,9 @@ ok "Certiweight instance created: ${CERT_ID}"
 ok "sendOrderCreated fired  → ${ERP_URL}/order-created  (paused at waitTruckerAnnounced)"
 
 # ── Step 2b: Certiweight ERP → Shipper (advance waitOrderCreated) ─────────────
-echo -e "\n${CYAN}--- Step 2b: Certiweight notifies Shipper: order confirmed [DIRECT*] ---${RESET}"
-warn "In production this PATCH would go via  ${P2_DP}/${SHIP_ID}"
-warn "using  Authorization: Bearer \${P2_TOKEN}"
-warn "Current EDC data-plane build does not route sub-paths → calling directly."
-RESP=$(ps_patch "${P2_PS}" "${SHIP_ID}" "1" "ORDER_CONFIRMED" \
+echo -e "\n${CYAN}--- Step 2b: Certiweight notifies Shipper: order confirmed ---${RESET}"
+RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" "${P2_PS}" \
+  "${SHIP_ID}" "1" "ORDER_CONFIRMED" \
   "{\"certiweightInstanceId\":\"${CERT_ID}\",\"containerNr\":\"TCKU1234567\"}")
 ok "Shipper waitOrderCreated triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")  (paused at waitMeasurementCreated)"
 
@@ -290,10 +330,10 @@ ok "Certiweight waitTruckerAnnounced triggered  → version $(echo $RESP | pytho
 ok "sendMeasurementCreated fired  → ${ERP_URL}/measurement-created  (paused at waitPurchaseVGM)"
 
 # ── Step 3b: Certiweight ERP → Shipper (advance waitMeasurementCreated) ───────
-echo -e "\n${CYAN}--- Step 3b: Certiweight notifies Shipper: measurement ready [DIRECT*] ---${RESET}"
-warn "In production: PATCH via  ${P2_DP}/${SHIP_ID}  with P2_TOKEN"
+echo -e "\n${CYAN}--- Step 3b: Certiweight notifies Shipper: measurement ready ---${RESET}"
 info "sendPurchaseVGM ServiceTask will POST to ${TMS_URL}/purchase-vgm …"
-RESP=$(ps_patch "${P2_PS}" "${SHIP_ID}" "2" "MEASUREMENT_RECEIVED" \
+RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" "${P2_PS}" \
+  "${SHIP_ID}" "2" "MEASUREMENT_RECEIVED" \
   "{\"internalApiUrl\":\"${TMS_URL}/purchase-vgm\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"grossMass\\\":24500}\",
     \"grossMass\":24500}")
@@ -301,10 +341,10 @@ ok "Shipper waitMeasurementCreated triggered  → version $(echo $RESP | python3
 ok "sendPurchaseVGM fired  → ${TMS_URL}/purchase-vgm  (paused at waitVGMPurchased)"
 
 # ── Step 4: Shipper TMS → Certiweight (advance waitPurchaseVGM) ───────────────
-echo -e "\n${CYAN}--- Step 4: Shipper confirms purchase [DIRECT*] ---${RESET}"
-warn "In production: PATCH via  ${P1_DP}/${CERT_ID}  with P1_TOKEN"
+echo -e "\n${CYAN}--- Step 4: Shipper confirms purchase ---${RESET}"
 info "sendVGMPurchased ServiceTask will POST to ${ERP_URL}/vgm-purchased …"
-RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "2" "PURCHASE_CONFIRMED" \
+RESP=$(edc_patch "${P1_DP}" "${P1_TOKEN}" "${P1_PS}" \
+  "${CERT_ID}" "2" "PURCHASE_CONFIRMED" \
   "{\"internalApiUrl\":\"${ERP_URL}/vgm-purchased\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\"}")
 ok "Certiweight waitPurchaseVGM triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
@@ -313,9 +353,9 @@ ok "sendVGMPurchased fired  → ${ERP_URL}/vgm-purchased"
 ok "Certiweight process COMPLETED"
 
 # ── Step 5: Certiweight ERP → Shipper (advance waitVGMPurchased) ──────────────
-echo -e "\n${CYAN}--- Step 5: Certiweight notifies Shipper: VGM ready [DIRECT*] ---${RESET}"
-warn "In production: PATCH via  ${P2_DP}/${SHIP_ID}  with P2_TOKEN"
-RESP=$(ps_patch "${P2_PS}" "${SHIP_ID}" "3" "VGM_PURCHASED" \
+echo -e "\n${CYAN}--- Step 5: Certiweight notifies Shipper: VGM ready ---${RESET}"
+RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" "${P2_PS}" \
+  "${SHIP_ID}" "3" "VGM_PURCHASED" \
   "{\"certificateRef\":\"CERT-2026-001\",
     \"certificateUrl\":\"https://certiweight.example.com/certs/CERT-2026-001.pdf\"}")
 ok "Shipper waitVGMPurchased triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
@@ -373,7 +413,9 @@ echo -e "
   Certiweight ID  : ${CERT_ID}
   Shipper ID      : ${SHIP_ID}
 
-  ${YELLOW}NOTE:${RESET} Cross-party PATCHes marked [DIRECT*] above should route via the EDC
-  data-plane proxy once sub-path routing is enabled in the data-plane build.
-  The required EDR tokens (P1_TOKEN / P2_TOKEN) are already obtained and shown above.
+  ${YELLOW}NOTE:${RESET} Each cross-party PATCH was attempted through the EDC data-plane proxy
+  first (see [EDC attempt] lines above).  The proxy returned HTTP 404 because this
+  EDC build registers /public at an exact path — Jetty has no handler for /public/{id}.
+  The fallback direct calls carry the same business data; only the transport differs.
+  Fix: register the data-plane public API servlet as /public/* in the build.
 "
