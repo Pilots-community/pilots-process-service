@@ -31,6 +31,36 @@ warn() { echo -e "${YELLOW}  ⚠ $*${RESET}" >&2; }
 fail() { echo -e "${RED}  ✗ $*${RESET}" >&2; exit 1; }
 hdr()  { echo -e "\n${BOLD}══ $* ══${RESET}" >&2; }
 
+# flow_out LABEL JSON — show outbound payload (yellow ↑)
+flow_out() {
+  echo -e "${YELLOW}  ↑ $1${RESET}" >&2
+  echo "$2" | python3 -c "
+import sys, json
+try: print(json.dumps(json.loads(sys.stdin.read()), indent=6))
+except: pass" | sed 's/^/      /' >&2
+}
+
+# flow_in LABEL JSON — show inbound response fields: id, serviceDefinition, state, version (green ↓)
+flow_in() {
+  echo -e "${GREEN}  ↓ $1${RESET}" >&2
+  echo "$2" | python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    out = {k: d[k] for k in ('id', 'serviceDefinition', 'state', 'version') if k in d}
+    print(json.dumps(out, indent=6))
+except: pass" | sed 's/^/      /' >&2
+}
+
+# internal_post TASK_NAME URL JSON — show ServiceTask outbound POST (cyan ⚙)
+internal_post() {
+  echo -e "${CYAN}  ⚙  ${BOLD}$1${RESET}${CYAN}  →  POST $2${RESET}" >&2
+  echo "$3" | python3 -c "
+import sys, json
+try: print(json.dumps(json.loads(sys.stdin.read()), indent=6))
+except: pass" | sed 's/^/      /' >&2
+}
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Management API (host-side ports)
 P1_MGMT="${P1_MGMT:-http://localhost:19193/management}"
@@ -166,9 +196,11 @@ ps_post() { curl -s -X POST -H "Content-Type: application/json" -d "$2" "${1}/se
 # ps_patch URL ID VERSION STATE PARAMS_JSON
 ps_patch() {
   local base="$1" id="$2" ver="$3" state="$4" params="$5"
+  local body="{\"state\":\"${state}\",\"parameters\":${params}}"
+  flow_out "PATCH ${base}/serviceInstances/${id}" "$body"
   curl -s -X PATCH -H "Content-Type: application/json" \
     -H "If-Match: \"${ver}\"" \
-    -d "{\"state\":\"${state}\",\"parameters\":${params}}" \
+    -d "$body" \
     "${base}/serviceInstances/${id}"
 }
 
@@ -187,7 +219,7 @@ edc_patch() {
   local id="$3" ver="$4" state="$5" params="$6"
   local body="{\"state\":\"${state}\",\"parameters\":${params}}"
 
-  info "[EDC] PATCH ${dp_url}/${id}  (Authorization: Bearer <token>)"
+  flow_out "PATCH ${dp_url}/${id}  [EDC — Authorization: Bearer <token>]" "$body"
   local resp http_code
   resp=$(curl -s -w "\n%{http_code}" -X PATCH \
     -H "Authorization: Bearer ${token}" \
@@ -201,6 +233,7 @@ edc_patch() {
 
   if [[ "$http_code" =~ ^2 ]]; then
     ok "[EDC] PATCH succeeded via data-plane proxy  (HTTP ${http_code})"
+    flow_in "Response from process service" "$body_only"
     echo "$body_only"
     return
   fi
@@ -265,21 +298,21 @@ hdr "Section 3 — VGM business flow"
 
 # ── Step 1: Shipper creates process instance ──────────────────────────────────
 echo -e "\n${CYAN}--- Step 1: Shipper creates shipperProcess instance [DIRECT] ---${RESET}"
-SHIP_RESP=$(ps_post "${P2_PS}" \
-  "{\"serviceDefinition\":\"shipperProcess\",
+SHIP_BODY="{\"serviceDefinition\":\"shipperProcess\",
     \"stakeholders\":[
       {\"role\":\"customer\",\"party\":\"${P2_ID}\"},
       {\"role\":\"provider\",\"party\":\"${P1_ID}\"}
     ],
-    \"parameters\":{\"containerNr\":\"TCKU1234567\",\"bookingNr\":\"BKG-2026-001\"}}")
+    \"parameters\":{\"containerNr\":\"TCKU1234567\",\"bookingNr\":\"BKG-2026-001\"}}"
+flow_out "POST ${P2_PS}/serviceInstances" "$SHIP_BODY"
+SHIP_RESP=$(ps_post "${P2_PS}" "$SHIP_BODY")
+flow_in "Response from P2 process service" "$SHIP_RESP"
 SHIP_ID=$(echo "$SHIP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 ok "Shipper instance created: ${SHIP_ID}  (paused at waitOrderCreated)"
 
 # ── Step 2: Certiweight creates process instance ──────────────────────────────
 echo -e "\n${CYAN}--- Step 2: Certiweight creates certiweightVGMProcess instance [DIRECT] ---${RESET}"
-info "sendOrderCreated ServiceTask will POST to ${ERP_URL}/order-created …"
-CERT_RESP=$(ps_post "${P1_PS}" \
-  "{\"serviceDefinition\":\"certiweightVGMProcess\",
+CERT_BODY="{\"serviceDefinition\":\"certiweightVGMProcess\",
     \"stakeholders\":[
       {\"role\":\"provider\",\"party\":\"${P1_ID}\"},
       {\"role\":\"customer\",\"party\":\"${P2_ID}\"}
@@ -288,10 +321,15 @@ CERT_RESP=$(ps_post "${P1_PS}" \
       \"internalApiUrl\":\"${ERP_URL}/order-created\",
       \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"bookingNr\\\":\\\"BKG-2026-001\\\"}\",
       \"shipperInstanceId\":\"${SHIP_ID}\"
-    }}")
+    }}"
+flow_out "POST ${P1_PS}/serviceInstances" "$CERT_BODY"
+CERT_RESP=$(ps_post "${P1_PS}" "$CERT_BODY")
+flow_in "Response from P1 process service" "$CERT_RESP"
 CERT_ID=$(echo "$CERT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 ok "Certiweight instance created: ${CERT_ID}"
-ok "sendOrderCreated fired  → ${ERP_URL}/order-created  (paused at waitTruckerAnnounced)"
+internal_post "sendOrderCreated" "${ERP_URL}/order-created" \
+  "{\"containerNr\":\"TCKU1234567\",\"bookingNr\":\"BKG-2026-001\"}"
+ok "sendOrderCreated fired  (paused at waitTruckerAnnounced)"
 
 # ── Step 2b: Certiweight ERP → Shipper (advance waitOrderCreated) ─────────────
 echo -e "\n${CYAN}--- Step 2b: Certiweight notifies Shipper: order confirmed [EDC] ---${RESET}"
@@ -302,37 +340,40 @@ ok "Shipper waitOrderCreated triggered  → version $(echo $RESP | python3 -c "i
 
 # ── Step 3: Trucker arrives – Certiweight self-PATCH ──────────────────────────
 echo -e "\n${CYAN}--- Step 3: Trucker arrives — Certiweight PATCH (own service) [DIRECT] ---${RESET}"
-info "sendMeasurementCreated ServiceTask will POST to ${ERP_URL}/measurement-created …"
 RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "1" "TRUCKER_ANNOUNCED" \
   "{\"internalApiUrl\":\"${ERP_URL}/measurement-created\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"grossMass\\\":24500,\\\"unit\\\":\\\"kg\\\"}\",
     \"truckId\":\"TRK-42\",
     \"grossMass\":24500}")
+flow_in "Response from P1 process service" "$RESP"
 ok "Certiweight waitTruckerAnnounced triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
-ok "sendMeasurementCreated fired  → ${ERP_URL}/measurement-created  (paused at waitPurchaseVGM)"
+internal_post "sendMeasurementCreated" "${ERP_URL}/measurement-created" \
+  "{\"containerNr\":\"TCKU1234567\",\"grossMass\":24500,\"unit\":\"kg\"}"
+ok "sendMeasurementCreated fired  (paused at waitPurchaseVGM)"
 
 # ── Step 3b: Certiweight ERP → Shipper (advance waitMeasurementCreated) ───────
 echo -e "\n${CYAN}--- Step 3b: Certiweight notifies Shipper: measurement ready [EDC] ---${RESET}"
-info "sendPurchaseVGM ServiceTask will POST to ${TMS_URL}/purchase-vgm …"
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "2" "MEASUREMENT_RECEIVED" \
   "{\"internalApiUrl\":\"${TMS_URL}/purchase-vgm\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"grossMass\\\":24500}\",
     \"grossMass\":24500}")
 ok "Shipper waitMeasurementCreated triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
-ok "sendPurchaseVGM fired  → ${TMS_URL}/purchase-vgm  (paused at waitVGMPurchased)"
+internal_post "sendPurchaseVGM" "${TMS_URL}/purchase-vgm" \
+  "{\"containerNr\":\"TCKU1234567\",\"grossMass\":24500}"
+ok "sendPurchaseVGM fired  (paused at waitVGMPurchased)"
 
 # ── Step 4: Shipper TMS → Certiweight (advance waitPurchaseVGM) ───────────────
 echo -e "\n${CYAN}--- Step 4: Shipper confirms purchase [EDC] ---${RESET}"
-info "sendVGMPurchased ServiceTask will POST to ${ERP_URL}/vgm-purchased …"
 RESP=$(edc_patch "${P1_DP}" "${P1_TOKEN}" \
   "${CERT_ID}" "2" "PURCHASE_CONFIRMED" \
   "{\"internalApiUrl\":\"${ERP_URL}/vgm-purchased\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\"}")
 ok "Certiweight waitPurchaseVGM triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
 ok "taskProcessPayment + taskCreateCertificate auto-completed (placeholders)"
-ok "sendVGMPurchased fired  → ${ERP_URL}/vgm-purchased"
-ok "Certiweight process COMPLETED"
+internal_post "sendVGMPurchased" "${ERP_URL}/vgm-purchased" \
+  "{\"containerNr\":\"TCKU1234567\",\"certificateRef\":\"CERT-2026-001\"}"
+ok "sendVGMPurchased fired  — Certiweight process COMPLETED"
 
 # ── Step 5: Certiweight ERP → Shipper (advance waitVGMPurchased) ──────────────
 echo -e "\n${CYAN}--- Step 5: Certiweight notifies Shipper: VGM ready [EDC] ---${RESET}"
@@ -341,8 +382,7 @@ RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "{\"certificateRef\":\"CERT-2026-001\",
     \"certificateUrl\":\"https://certiweight.example.com/certs/CERT-2026-001.pdf\"}")
 ok "Shipper waitVGMPurchased triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
-ok "taskDownloadCertificate auto-completed (placeholder)"
-ok "Shipper process COMPLETED"
+ok "taskDownloadCertificate auto-completed (placeholder)  — Shipper process COMPLETED"
 
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Section 4 — Final state verification  [EDC]"
