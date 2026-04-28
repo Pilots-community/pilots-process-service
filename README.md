@@ -20,6 +20,7 @@ It is designed to sit behind an [Eclipse Dataspace Connector (EDC)](https://gith
 
 **Examples**
 - [Example 1 — Invoicing system](docs/how-it-works-example1.md)
+- [Example 2 — VGM weighing service (Certiweight + Shipper)](docs/how-it-works-example2.md)
 
 ---
 

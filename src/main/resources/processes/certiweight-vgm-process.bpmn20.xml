@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Certiweight VGM Process  (provider / weighing company)
+  Process ID: certiweightVGMProcess
+
+  Flow:
+    Start
+      -> ServiceTask  "Send Order Created"       calls internalApiUrl (set at POST time)
+      -> ReceiveTask  "Wait for Trucker"          PATCH by Certiweight's own system when trucker arrives
+                                                  PATCH must also set internalApiUrl for next ServiceTask
+      -> ServiceTask  "Send Measurement Created"  calls internalApiUrl (set by previous PATCH)
+      -> ReceiveTask  "Wait for Purchase VGM"     PATCH by Shipper (through EDC)
+                                                  PATCH must also set internalApiUrl for sendVGMPurchased
+      -> ServiceTask  "Process Payment"           no-op placeholder (replace with real payment delegate)
+      -> ServiceTask  "Create Certificate"        no-op placeholder (replace with real cert delegate)
+      -> ServiceTask  "Send VGM Purchased"        calls internalApiUrl (set by Shipper PATCH)
+    End
+
+  Required process variables at start (POST parameters):
+    internalApiUrl  - URL to notify when order is created (e.g. http://certiweight-erp/order-created)
+    payloadData     - JSON body for the order created notification
+
+  Variables set on each subsequent PATCH (before triggering the next ServiceTask):
+    internalApiUrl  - overwritten with the URL for the next outbound notification
+    payloadData     - overwritten with the payload for that notification
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="https://example.com/lod/vgm">
+
+    <process id="certiweightVGMProcess"
+             name="Certiweight LOD VGM Process"
+             isExecutable="true">
+
+        <startEvent id="startEvent" name="Start VGM Workflow"/>
+        <sequenceFlow id="flow1" sourceRef="startEvent" targetRef="sendOrderCreated"/>
+
+        <serviceTask id="sendOrderCreated"
+                     name="Send Order Created"
+                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
+        <sequenceFlow id="flow2" sourceRef="sendOrderCreated" targetRef="waitTruckerAnnounced"/>
+
+        <!-- Pauses here. PATCH by Certiweight when trucker arrives at facility.
+             Include updated internalApiUrl + payloadData for sendMeasurementCreated. -->
+        <receiveTask id="waitTruckerAnnounced" name="Wait for Trucker Announcement"/>
+        <sequenceFlow id="flow3" sourceRef="waitTruckerAnnounced" targetRef="sendMeasurementCreated"/>
+
+        <serviceTask id="sendMeasurementCreated"
+                     name="Send Measurement Created"
+                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
+        <sequenceFlow id="flow4" sourceRef="sendMeasurementCreated" targetRef="waitPurchaseVGM"/>
+
+        <!-- Pauses here. PATCH by Shipper (via EDC) when they confirm purchase.
+             Include updated internalApiUrl + payloadData for sendVGMPurchased. -->
+        <receiveTask id="waitPurchaseVGM" name="Wait for Purchase VGM"/>
+        <sequenceFlow id="flow5" sourceRef="waitPurchaseVGM" targetRef="taskProcessPayment"/>
+
+        <!-- Placeholder: replace flowable:expression with a real payment delegate when ready. -->
+        <serviceTask id="taskProcessPayment"
+                     name="Process Payment"
+                     flowable:expression="${true}"/>
+        <sequenceFlow id="flow6" sourceRef="taskProcessPayment" targetRef="taskCreateCertificate"/>
+
+        <!-- Placeholder: replace flowable:expression with a real certificate delegate when ready. -->
+        <serviceTask id="taskCreateCertificate"
+                     name="Create Certificate"
+                     flowable:expression="${true}"/>
+        <sequenceFlow id="flow7" sourceRef="taskCreateCertificate" targetRef="sendVGMPurchased"/>
+
+        <serviceTask id="sendVGMPurchased"
+                     name="Send VGM Purchased"
+                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
+        <sequenceFlow id="flow8" sourceRef="sendVGMPurchased" targetRef="endEvent"/>
+
+        <endEvent id="endEvent" name="Workflow Complete"/>
+
+    </process>
+</definitions>
