@@ -15,14 +15,10 @@
 #   Assets registered                    : ./register-edc-asset.sh
 #   jq + python3 available on PATH
 #
-# NOTE on EDC data-plane sub-path routing:
-#   The current tractus-x EDC build registers the public API at /public (exact
-#   match), so requests to /public/{id} return Jetty 404 before reaching the
-#   Jersey application.  GET /public (base path) proxies correctly.
-#   Contract negotiation and EDR token exchange work in full; the limitation is
-#   only in the data-plane's HTTP routing.  Steps that are affected are marked
-#   [DIRECT] below — they call the process service directly rather than through
-#   the data-plane proxy.  Everything labelled [EDC] goes over the dataspace.
+# All cross-party API calls (GET and PATCH) go through the EDC data-plane proxy
+# using the HttpData-PULL EDR token.  The custom DataPlanePublicApiController
+# extension supports all HTTP methods and sub-path forwarding, so PATCH
+# /public/{id} is routed transparently to the backing process service.
 
 set -euo pipefail
 
@@ -181,19 +177,17 @@ edc_list_instances() {
   curl -s -H "Authorization: Bearer $2" "${1}"
 }
 
-# edc_patch DP_URL TOKEN DIRECT_BASE ID VERSION STATE PARAMS_JSON
+# edc_patch DP_URL TOKEN ID VERSION STATE PARAMS_JSON
 #
-# Attempts the PATCH through the EDC data-plane proxy first.
-# Prints the HTTP status so the reader can see exactly what happened.
-# If the proxy returns a non-2xx (currently 404 due to Jetty sub-path routing
-# limitation in this EDC build), falls back to a direct call and explains why.
-# Either way the process advances and the JSON response is printed to stdout.
+# PATCHes through the EDC data-plane proxy using the EDR Bearer token.
+# The custom DataPlanePublicApiController forwards the full path, method,
+# body, Content-Type and If-Match to the backing process service.
 edc_patch() {
-  local dp_url="$1" token="$2" direct_base="$3"
-  local id="$4" ver="$5" state="$6" params="$7"
+  local dp_url="$1" token="$2"
+  local id="$3" ver="$4" state="$5" params="$6"
   local body="{\"state\":\"${state}\",\"parameters\":${params}}"
 
-  info "[EDC attempt] PATCH ${dp_url}/${id}  (Authorization: Bearer <token>)"
+  info "[EDC] PATCH ${dp_url}/${id}  (Authorization: Bearer <token>)"
   local resp http_code
   resp=$(curl -s -w "\n%{http_code}" -X PATCH \
     -H "Authorization: Bearer ${token}" \
@@ -211,16 +205,7 @@ edc_patch() {
     return
   fi
 
-  warn "[EDC] PATCH via proxy returned HTTP ${http_code}"
-  warn "      Cause: EDC data-plane in this build registers /public at exact path only;"
-  warn "             Jetty returns 404 for /public/{id} before the Jersey app is reached."
-  warn "      Fix:   Register public API servlet as /public/* (wildcard) in data-plane build."
-  warn "      Falling back to direct call: PATCH ${direct_base}/serviceInstances/${id}"
-  curl -s -X PATCH \
-    -H "Content-Type: application/json" \
-    -H "If-Match: \"${ver}\"" \
-    -d "$body" \
-    "${direct_base}/serviceInstances/${id}"
+  fail "[EDC] PATCH via proxy returned HTTP ${http_code}: ${body_only}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,9 +244,8 @@ ok "P1 EDR token obtained (P2 can now call P1's data-plane)"
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Section 2 — Authorized data-plane access  [EDC]"
 # ─────────────────────────────────────────────────────────────────────────────
-# Verify both tokens grant access to the respective process services via the
-# EDC data-plane public proxy.  Only the base URL (GET /public) is routed by
-# this EDC build; sub-path + PATCH routing requires a data-plane rebuild.
+# Verify both tokens grant list access to the respective process services via
+# the EDC data-plane public proxy.
 
 info "[EDC] P1 reads P2 service instances via data-plane proxy …"
 P2_LIST=$(edc_list_instances "${P2_DP}" "${P2_TOKEN}")
@@ -276,10 +260,8 @@ ok "P1 process service accessible via EDC (${P1_LIST_COUNT} existing instances)"
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Section 3 — VGM business flow"
 # ─────────────────────────────────────────────────────────────────────────────
-# Cross-party PATCHes use edc_patch(), which:
-#   1. Attempts the call through the EDC data-plane proxy with the EDR Bearer token
-#   2. If the proxy returns non-2xx, logs the HTTP status + reason and falls back direct
-# Each step shows exactly what happened so the output is self-documenting.
+# Cross-party PATCHes go through the EDC data-plane proxy via edc_patch().
+# Own-party calls (Certiweight PATCHing its own service) go direct.
 
 # ── Step 1: Shipper creates process instance ──────────────────────────────────
 echo -e "\n${CYAN}--- Step 1: Shipper creates shipperProcess instance [DIRECT] ---${RESET}"
@@ -312,8 +294,8 @@ ok "Certiweight instance created: ${CERT_ID}"
 ok "sendOrderCreated fired  → ${ERP_URL}/order-created  (paused at waitTruckerAnnounced)"
 
 # ── Step 2b: Certiweight ERP → Shipper (advance waitOrderCreated) ─────────────
-echo -e "\n${CYAN}--- Step 2b: Certiweight notifies Shipper: order confirmed ---${RESET}"
-RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" "${P2_PS}" \
+echo -e "\n${CYAN}--- Step 2b: Certiweight notifies Shipper: order confirmed [EDC] ---${RESET}"
+RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "1" "ORDER_CONFIRMED" \
   "{\"certiweightInstanceId\":\"${CERT_ID}\",\"containerNr\":\"TCKU1234567\"}")
 ok "Shipper waitOrderCreated triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")  (paused at waitMeasurementCreated)"
@@ -330,9 +312,9 @@ ok "Certiweight waitTruckerAnnounced triggered  → version $(echo $RESP | pytho
 ok "sendMeasurementCreated fired  → ${ERP_URL}/measurement-created  (paused at waitPurchaseVGM)"
 
 # ── Step 3b: Certiweight ERP → Shipper (advance waitMeasurementCreated) ───────
-echo -e "\n${CYAN}--- Step 3b: Certiweight notifies Shipper: measurement ready ---${RESET}"
+echo -e "\n${CYAN}--- Step 3b: Certiweight notifies Shipper: measurement ready [EDC] ---${RESET}"
 info "sendPurchaseVGM ServiceTask will POST to ${TMS_URL}/purchase-vgm …"
-RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" "${P2_PS}" \
+RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "2" "MEASUREMENT_RECEIVED" \
   "{\"internalApiUrl\":\"${TMS_URL}/purchase-vgm\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"grossMass\\\":24500}\",
@@ -341,9 +323,9 @@ ok "Shipper waitMeasurementCreated triggered  → version $(echo $RESP | python3
 ok "sendPurchaseVGM fired  → ${TMS_URL}/purchase-vgm  (paused at waitVGMPurchased)"
 
 # ── Step 4: Shipper TMS → Certiweight (advance waitPurchaseVGM) ───────────────
-echo -e "\n${CYAN}--- Step 4: Shipper confirms purchase ---${RESET}"
+echo -e "\n${CYAN}--- Step 4: Shipper confirms purchase [EDC] ---${RESET}"
 info "sendVGMPurchased ServiceTask will POST to ${ERP_URL}/vgm-purchased …"
-RESP=$(edc_patch "${P1_DP}" "${P1_TOKEN}" "${P1_PS}" \
+RESP=$(edc_patch "${P1_DP}" "${P1_TOKEN}" \
   "${CERT_ID}" "2" "PURCHASE_CONFIRMED" \
   "{\"internalApiUrl\":\"${ERP_URL}/vgm-purchased\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\"}")
@@ -353,8 +335,8 @@ ok "sendVGMPurchased fired  → ${ERP_URL}/vgm-purchased"
 ok "Certiweight process COMPLETED"
 
 # ── Step 5: Certiweight ERP → Shipper (advance waitVGMPurchased) ──────────────
-echo -e "\n${CYAN}--- Step 5: Certiweight notifies Shipper: VGM ready ---${RESET}"
-RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" "${P2_PS}" \
+echo -e "\n${CYAN}--- Step 5: Certiweight notifies Shipper: VGM ready [EDC] ---${RESET}"
+RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "3" "VGM_PURCHASED" \
   "{\"certificateRef\":\"CERT-2026-001\",
     \"certificateUrl\":\"https://certiweight.example.com/certs/CERT-2026-001.pdf\"}")
@@ -404,7 +386,7 @@ hdr "Summary"
 # ─────────────────────────────────────────────────────────────────────────────
 echo -e "
   ${GREEN}✓ EDR negotiation${RESET}  — catalog, contract, transfer, token exchange over EDC dataspace
-  ${GREEN}✓ Data-plane GET${RESET}   — both process services readable via authorized EDC proxy
+  ${GREEN}✓ Data-plane proxy${RESET} — GET and PATCH both routed through EDC public API
   ${GREEN}✓ VGM flow${RESET}         — all 5 steps completed; 4 ServiceTask outbound calls confirmed
   ${GREEN}✓ Both processes${RESET}   — COMPLETED state verified
 
@@ -412,10 +394,4 @@ echo -e "
   P1 EDR transfer : ${P1_TP}
   Certiweight ID  : ${CERT_ID}
   Shipper ID      : ${SHIP_ID}
-
-  ${YELLOW}NOTE:${RESET} Each cross-party PATCH was attempted through the EDC data-plane proxy
-  first (see [EDC attempt] lines above).  The proxy returned HTTP 404 because this
-  EDC build registers /public at an exact path — Jetty has no handler for /public/{id}.
-  The fallback direct calls carry the same business data; only the transport differs.
-  Fix: register the data-plane public API servlet as /public/* in the build.
 "
