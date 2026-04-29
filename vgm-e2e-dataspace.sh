@@ -1,18 +1,33 @@
 #!/bin/bash
 # vgm-e2e-dataspace.sh
 #
-# End-to-end VGM flow through the EDC dataspace.
+# Drives the Certiweight (P1 / provider) side of the VGM flow.
+# The Shipper (P2 / consumer) side is operated via the frontend.
+#
+# Usage:
+#   ./vgm-e2e-dataspace.sh [SHIP_ID]
+#
+#   SHIP_ID  — optional UUID of an existing shipperProcess instance on P2.
+#              If omitted the script queries P2's process service and picks
+#              the most recently created STARTED instance automatically.
+#
+# Demo setup:
+#   1. Shipper (P2) creates a shipperProcess instance via the frontend
+#   2. Run this script — it drives everything on Certiweight's (P1) side
+#      and sends cross-party PATCHes to P2 through the EDC data-plane
 #
 # Sections:
-#   1. Bidirectional EDR negotiation  (fully over EDC)
-#   2. Authorized data-plane access verification (GET via EDC proxy)
-#   3. VGM business flow              (process service API calls)
-#   4. Final state verification       (GET both instances)
+#   0. Prerequisites check
+#   1. Bidirectional EDR negotiation  [EDC]
+#   2. Authorized data-plane access verification  [EDC]
+#   3. VGM business flow (P1 side only — P2 instance created by frontend)
+#   4. Final state verification  [EDC]
 #
 # Prerequisites:
 #   pilots-dataspace stack running       : cd ../pilots-dataspace && docker compose up -d
 #   Process services running & current   : docker compose up -d --build
 #   Assets registered                    : ./register-edc-asset.sh
+#   Frontend running, P2 instance created: http://localhost:3002
 #   jq + python3 available on PATH
 #
 # All cross-party API calls (GET and PATCH) go through the EDC data-plane proxy
@@ -21,6 +36,9 @@
 # /public/{id} is routed transparently to the backing process service.
 
 set -euo pipefail
+
+# Optional ship instance ID from command line or environment
+SHIP_ID="${1:-${SHIP_ID:-}}"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'
@@ -256,6 +274,35 @@ curl -sf "${P1_PS}/serviceInstances" > /dev/null || fail "P1 process service not
 curl -sf "${P2_PS}/serviceInstances" > /dev/null || fail "P2 process service not reachable"
 ok "Both process services reachable"
 
+# ── Resolve Shipper instance ──────────────────────────────────────────────────
+# If SHIP_ID was not supplied, find the most recent STARTED shipperProcess on P2.
+if [ -z "$SHIP_ID" ]; then
+  info "No SHIP_ID supplied — querying P2 for a STARTED shipperProcess instance …"
+  SHIP_CANDIDATES=$(curl -s "${P2_PS}/serviceInstances?serviceDefinition=shipperProcess")
+  SHIP_TOTAL=$(echo "$SHIP_CANDIDATES" | python3 -c "
+import sys, json
+items = json.load(sys.stdin).get('items', [])
+started = [i for i in items if i.get('state') in ('STARTED', None)]
+print(len(started))" 2>/dev/null || echo "0")
+  [ "$SHIP_TOTAL" -eq 0 ] && fail "No STARTED shipperProcess instance found on P2. Create one via the frontend first (http://localhost:3002)."
+  [ "$SHIP_TOTAL" -gt 1 ] && warn "Multiple STARTED instances found — using the most recently created one."
+  SHIP_ID=$(echo "$SHIP_CANDIDATES" | python3 -c "
+import sys, json
+items = json.load(sys.stdin).get('items', [])
+started = [i for i in items if i.get('state') in ('STARTED', None)]
+started.sort(key=lambda i: i.get('createdAt',''), reverse=True)
+print(started[0]['id'])")
+  ok "Found shipperProcess instance: ${SHIP_ID}"
+else
+  ok "Using supplied shipperProcess instance: ${SHIP_ID}"
+fi
+
+# Extract business parameters from the shipper instance for use in Certiweight's payload
+SHIP_PARAMS=$(curl -s "${P2_PS}/serviceInstances/${SHIP_ID}")
+CONTAINER_NR=$(echo "$SHIP_PARAMS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('parameters',{}).get('containernr','TCKU1234567'))")
+BOOKING_NR=$(echo "$SHIP_PARAMS"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('parameters',{}).get('bookingnr','BKG-2026-001'))")
+ok "Container: ${CONTAINER_NR}  Booking: ${BOOKING_NR}"
+
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Section 1 — Bidirectional EDR negotiation  [EDC]"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,19 +343,10 @@ hdr "Section 3 — VGM business flow"
 # Cross-party PATCHes go through the EDC data-plane proxy via edc_patch().
 # Own-party calls (Certiweight PATCHing its own service) go direct.
 
-# ── Step 1: Shipper creates process instance ──────────────────────────────────
-echo -e "\n${CYAN}--- Step 1: Shipper creates shipperProcess instance [DIRECT] ---${RESET}"
-SHIP_BODY="{\"serviceDefinition\":\"shipperProcess\",
-    \"stakeholders\":[
-      {\"role\":\"customer\",\"party\":\"${P2_ID}\"},
-      {\"role\":\"provider\",\"party\":\"${P1_ID}\"}
-    ],
-    \"parameters\":{\"containerNr\":\"TCKU1234567\",\"bookingNr\":\"BKG-2026-001\"}}"
-flow_out "POST ${P2_PS}/serviceInstances" "$SHIP_BODY"
-SHIP_RESP=$(ps_post "${P2_PS}" "$SHIP_BODY")
-flow_in "Response from P2 process service" "$SHIP_RESP"
-SHIP_ID=$(echo "$SHIP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-ok "Shipper instance created: ${SHIP_ID}  (paused at waitOrderCreated)"
+# ── Step 1: Shipper instance (created by frontend, not this script) ───────────
+echo -e "\n${CYAN}--- Step 1: Shipper instance [FRONTEND — P2] ---${RESET}"
+flow_in "Existing shipperProcess instance on P2" "$SHIP_PARAMS"
+ok "Shipper instance: ${SHIP_ID}  container: ${CONTAINER_NR}  booking: ${BOOKING_NR}"
 
 # ── Step 2: Certiweight creates process instance ──────────────────────────────
 echo -e "\n${CYAN}--- Step 2: Certiweight creates certiweightVGMProcess instance [DIRECT] ---${RESET}"
@@ -319,7 +357,7 @@ CERT_BODY="{\"serviceDefinition\":\"certiweightVGMProcess\",
     ],
     \"parameters\":{
       \"internalApiUrl\":\"${ERP_URL}/order-created\",
-      \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"bookingNr\\\":\\\"BKG-2026-001\\\"}\",
+      \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"bookingNr\\\":\\\"${BOOKING_NR}\\\"}\",
       \"shipperInstanceId\":\"${SHIP_ID}\"
     }}"
 flow_out "POST ${P1_PS}/serviceInstances" "$CERT_BODY"
@@ -328,27 +366,27 @@ flow_in "Response from P1 process service" "$CERT_RESP"
 CERT_ID=$(echo "$CERT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 ok "Certiweight instance created: ${CERT_ID}"
 internal_post "sendOrderCreated" "${ERP_URL}/order-created" \
-  "{\"containerNr\":\"TCKU1234567\",\"bookingNr\":\"BKG-2026-001\"}"
+  "{\"containerNr\":\"${CONTAINER_NR}\",\"bookingNr\":\"${BOOKING_NR}\"}"
 ok "sendOrderCreated fired  (paused at waitTruckerAnnounced)"
 
 # ── Step 2b: Certiweight ERP → Shipper (advance waitOrderCreated) ─────────────
 echo -e "\n${CYAN}--- Step 2b: Certiweight notifies Shipper: order confirmed [EDC] ---${RESET}"
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "1" "ORDER_CONFIRMED" \
-  "{\"certiweightInstanceId\":\"${CERT_ID}\",\"containerNr\":\"TCKU1234567\"}")
+  "{\"certiweightInstanceId\":\"${CERT_ID}\",\"containerNr\":\"${CONTAINER_NR}\"}")
 ok "Shipper waitOrderCreated triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")  (paused at waitMeasurementCreated)"
 
 # ── Step 3: Trucker arrives – Certiweight self-PATCH ──────────────────────────
 echo -e "\n${CYAN}--- Step 3: Trucker arrives — Certiweight PATCH (own service) [DIRECT] ---${RESET}"
 RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "1" "TRUCKER_ANNOUNCED" \
   "{\"internalApiUrl\":\"${ERP_URL}/measurement-created\",
-    \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"grossMass\\\":24500,\\\"unit\\\":\\\"kg\\\"}\",
+    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"grossMass\\\":24500,\\\"unit\\\":\\\"kg\\\"}\",
     \"truckId\":\"TRK-42\",
     \"grossMass\":24500}")
 flow_in "Response from P1 process service" "$RESP"
 ok "Certiweight waitTruckerAnnounced triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
 internal_post "sendMeasurementCreated" "${ERP_URL}/measurement-created" \
-  "{\"containerNr\":\"TCKU1234567\",\"grossMass\":24500,\"unit\":\"kg\"}"
+  "{\"containerNr\":\"${CONTAINER_NR}\",\"grossMass\":24500,\"unit\":\"kg\"}"
 ok "sendMeasurementCreated fired  (paused at waitPurchaseVGM)"
 
 # ── Step 3b: Certiweight ERP → Shipper (advance waitMeasurementCreated) ───────
@@ -356,11 +394,11 @@ echo -e "\n${CYAN}--- Step 3b: Certiweight notifies Shipper: measurement ready [
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "2" "MEASUREMENT_RECEIVED" \
   "{\"internalApiUrl\":\"${TMS_URL}/purchase-vgm\",
-    \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"grossMass\\\":24500}\",
+    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"grossMass\\\":24500}\",
     \"grossMass\":24500}")
 ok "Shipper waitMeasurementCreated triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
 internal_post "sendPurchaseVGM" "${TMS_URL}/purchase-vgm" \
-  "{\"containerNr\":\"TCKU1234567\",\"grossMass\":24500}"
+  "{\"containerNr\":\"${CONTAINER_NR}\",\"grossMass\":24500}"
 ok "sendPurchaseVGM fired  (paused at waitVGMPurchased)"
 
 # ── Step 4: Shipper TMS → Certiweight (advance waitPurchaseVGM) ───────────────
@@ -368,11 +406,11 @@ echo -e "\n${CYAN}--- Step 4: Shipper confirms purchase [EDC] ---${RESET}"
 RESP=$(edc_patch "${P1_DP}" "${P1_TOKEN}" \
   "${CERT_ID}" "2" "PURCHASE_CONFIRMED" \
   "{\"internalApiUrl\":\"${ERP_URL}/vgm-purchased\",
-    \"payloadData\":\"{\\\"containerNr\\\":\\\"TCKU1234567\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\"}")
+    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\"}")
 ok "Certiweight waitPurchaseVGM triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")"
 ok "taskProcessPayment + taskCreateCertificate auto-completed (placeholders)"
 internal_post "sendVGMPurchased" "${ERP_URL}/vgm-purchased" \
-  "{\"containerNr\":\"TCKU1234567\",\"certificateRef\":\"CERT-2026-001\"}"
+  "{\"containerNr\":\"${CONTAINER_NR}\",\"certificateRef\":\"CERT-2026-001\"}"
 ok "sendVGMPurchased fired  — Certiweight process COMPLETED"
 
 # ── Step 5: Certiweight ERP → Shipper (advance waitVGMPurchased) ──────────────
