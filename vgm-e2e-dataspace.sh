@@ -275,23 +275,23 @@ curl -sf "${P2_PS}/serviceInstances" > /dev/null || fail "P2 process service not
 ok "Both process services reachable"
 
 # ── Resolve Shipper instance ──────────────────────────────────────────────────
-# If SHIP_ID was not supplied, find the most recent STARTED shipperProcess on P2.
+# If SHIP_ID was not supplied, find the most recent active shipperProcess on P2.
 if [ -z "$SHIP_ID" ]; then
-  info "No SHIP_ID supplied — querying P2 for a STARTED shipperProcess instance …"
+  info "No SHIP_ID supplied — querying P2 for an active shipperProcess instance …"
   SHIP_CANDIDATES=$(curl -s "${P2_PS}/serviceInstances?serviceDefinition=shipperProcess")
   SHIP_TOTAL=$(echo "$SHIP_CANDIDATES" | python3 -c "
 import sys, json
 items = json.load(sys.stdin).get('items', [])
-started = [i for i in items if i.get('state') in ('STARTED', None)]
-print(len(started))" 2>/dev/null || echo "0")
-  [ "$SHIP_TOTAL" -eq 0 ] && fail "No STARTED shipperProcess instance found on P2. Create one via the frontend first (http://localhost:3002)."
-  [ "$SHIP_TOTAL" -gt 1 ] && warn "Multiple STARTED instances found — using the most recently created one."
+active = [i for i in items if i.get('state') not in ('vgm_purchased', 'COMPLETED', 'CANCELLED')]
+print(len(active))" 2>/dev/null || echo "0")
+  [ "$SHIP_TOTAL" -eq 0 ] && fail "No active shipperProcess instance found on P2. Create one via the frontend first (http://localhost:3002)."
+  [ "$SHIP_TOTAL" -gt 1 ] && warn "Multiple active instances found — using the most recently created one."
   SHIP_ID=$(echo "$SHIP_CANDIDATES" | python3 -c "
 import sys, json
 items = json.load(sys.stdin).get('items', [])
-started = [i for i in items if i.get('state') in ('STARTED', None)]
-started.sort(key=lambda i: i.get('createdAt',''), reverse=True)
-print(started[0]['id'])")
+active = [i for i in items if i.get('state') not in ('vgm_purchased', 'COMPLETED', 'CANCELLED')]
+active.sort(key=lambda i: i.get('createdAt',''), reverse=True)
+print(active[0]['id'])")
   ok "Found shipperProcess instance: ${SHIP_ID}"
 else
   ok "Using supplied shipperProcess instance: ${SHIP_ID}"
@@ -348,6 +348,8 @@ echo -e "\n${CYAN}--- Step 1: Shipper instance [FRONTEND — P2] ---${RESET}"
 flow_in "Existing shipperProcess instance on P2" "$SHIP_PARAMS"
 ok "Shipper instance: ${SHIP_ID}  container: ${CONTAINER_NR}  booking: ${BOOKING_NR}"
 
+read -rp $'\n  Press Enter to continue...' _
+
 # ── Step 2: Certiweight creates process instance ──────────────────────────────
 echo -e "\n${CYAN}--- Step 2: Certiweight creates certiweightVGMProcess instance [DIRECT] ---${RESET}"
 CERT_BODY="{\"serviceDefinition\":\"certiweightVGMProcess\",
@@ -369,12 +371,16 @@ internal_post "sendOrderCreated" "${ERP_URL}/order-created" \
   "{\"containerNr\":\"${CONTAINER_NR}\",\"bookingNr\":\"${BOOKING_NR}\"}"
 ok "sendOrderCreated fired  (paused at waitTruckerAnnounced)"
 
+read -rp $'\n  Press Enter to continue...' _
+
 # ── Step 2b: Certiweight ERP → Shipper (advance waitOrderCreated) ─────────────
 echo -e "\n${CYAN}--- Step 2b: Certiweight notifies Shipper: order confirmed [EDC] ---${RESET}"
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "1" "ORDER_CONFIRMED" \
   "{\"certiweightInstanceId\":\"${CERT_ID}\",\"containerNr\":\"${CONTAINER_NR}\"}")
 ok "Shipper waitOrderCreated triggered  → version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")  (paused at waitMeasurementCreated)"
+
+read -rp $'\n  Press Enter to continue...' _
 
 # ── Step 3: Trucker arrives – Certiweight self-PATCH ──────────────────────────
 echo -e "\n${CYAN}--- Step 3: Trucker arrives — Certiweight PATCH (own service) [DIRECT] ---${RESET}"
@@ -389,6 +395,8 @@ internal_post "sendMeasurementCreated" "${ERP_URL}/measurement-created" \
   "{\"containerNr\":\"${CONTAINER_NR}\",\"grossMass\":24500,\"unit\":\"kg\"}"
 ok "sendMeasurementCreated fired  (paused at waitPurchaseVGM)"
 
+read -rp $'\n  Press Enter to continue...' _
+
 # ── Step 3b: Certiweight ERP → Shipper (advance waitMeasurementCreated) ───────
 echo -e "\n${CYAN}--- Step 3b: Certiweight notifies Shipper: measurement ready [EDC] ---${RESET}"
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
@@ -401,6 +409,8 @@ internal_post "sendPurchaseVGM" "${TMS_URL}/purchase-vgm" \
   "{\"containerNr\":\"${CONTAINER_NR}\",\"grossMass\":24500}"
 ok "sendPurchaseVGM fired  (paused at waitVGMPurchased)"
 
+read -rp $'\n  Press Enter to continue...' _
+
 # ── Step 4: Shipper TMS → Certiweight (advance waitPurchaseVGM) ───────────────
 echo -e "\n${CYAN}--- Step 4: Shipper confirms purchase [EDC] ---${RESET}"
 RESP=$(edc_patch "${P1_DP}" "${P1_TOKEN}" \
@@ -412,6 +422,8 @@ ok "taskProcessPayment + taskCreateCertificate auto-completed (placeholders)"
 internal_post "sendVGMPurchased" "${ERP_URL}/vgm-purchased" \
   "{\"containerNr\":\"${CONTAINER_NR}\",\"certificateRef\":\"CERT-2026-001\"}"
 ok "sendVGMPurchased fired  — Certiweight process COMPLETED"
+
+read -rp $'\n  Press Enter to continue...' _
 
 # ── Step 5: Certiweight ERP → Shipper (advance waitVGMPurchased) ──────────────
 echo -e "\n${CYAN}--- Step 5: Certiweight notifies Shipper: VGM ready [EDC] ---${RESET}"
