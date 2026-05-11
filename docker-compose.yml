@@ -1,23 +1,16 @@
-# Two pilots-process-service instances — one per dataspace participant.
+# Two pilots-process-service instances and two frontend UIs — one per dataspace participant.
 #
-# Both containers join the pilots-dataspace Docker network so the EDC
+# Process services join the pilots-dataspace Docker network so the EDC
 # data-plane containers can reach them by hostname:
 #   http://p1-process-service:8080/serviceInstances
 #   http://p2-process-service:8080/serviceInstances
 #
-# Usage:
-#   # 1. Start pilots-dataspace first (creates the network)
-#   cd ../pilots-dataspace && docker compose up -d
+# Frontends are nginx containers that serve the React UI to the browser.
+# The browser makes API calls directly to localhost:8080 / localhost:8081,
+# so the frontend containers do NOT need to join the dataspace network.
 #
-#   # 2. Build and start both process service instances
-#   cd ../pilots-process-service && docker compose up -d --build
-#
-#   # 3. Register both as EDC assets
-#   ./register-edc-asset.sh
-#
-# The default network name assumes the pilots-dataspace compose project is
-# named "pilots-dataspace" (i.e. its directory is named pilots-dataspace).
-# Override with:  DATASPACE_NETWORK=my-network docker compose up -d
+# Usage: see start-local.sh
+# Override the Docker network:  DATASPACE_NETWORK=my-network docker compose up -d
 
 services:
 
@@ -25,7 +18,7 @@ services:
     build: .
     container_name: p1-process-service
     ports:
-      - "8080:8080"     # also reachable from host at localhost:8080
+      - "8080:8080"
     networks:
       - dataspace
 
@@ -33,9 +26,34 @@ services:
     build: .
     container_name: p2-process-service
     ports:
-      - "8081:8080"     # host port 8081 → container port 8080
+      - "8081:8080"
     networks:
       - dataspace
+
+  p1-frontend:
+    build:
+      context: ../pilots-client-app/frontend
+    container_name: p1-frontend
+    ports:
+      - "3002:80"
+    environment:
+      API_BASE_URL: "http://localhost:8080"
+      SERVICE_DEFINITION: "certiweightVGMProcess"
+      ALLOW_BOOKING: "false"
+      OWN_DID: "did:web:participant-1-identityhub%3A7093"
+      COUNTERPARTY_DID: "did:web:participant-2-identityhub%3A7083"
+
+  p2-frontend:
+    build:
+      context: ../pilots-client-app/frontend
+    container_name: p2-frontend
+    ports:
+      - "3003:80"
+    environment:
+      API_BASE_URL: "http://localhost:8081"
+      SERVICE_DEFINITION: "shipperProcess"
+      OWN_DID: "did:web:participant-2-identityhub%3A7083"
+      COUNTERPARTY_DID: "did:web:participant-1-identityhub%3A7093"
 
 networks:
   dataspace:

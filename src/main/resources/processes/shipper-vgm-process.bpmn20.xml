@@ -6,8 +6,9 @@
   Flow:
     Start
       -> ReceiveTask  "Wait for Order Created"      PATCH by Certiweight (via EDC) after order is placed
-                                                    PATCH must also set internalApiUrl for sendPurchaseVGM
+      -> ReceiveTask  "Wait for Trucker Announced"  PATCH by Certiweight (via EDC) when trucker arrives
       -> ReceiveTask  "Wait for Measurement Created" PATCH by Certiweight (via EDC) with weight data
+                                                    PATCH must also set internalApiUrl for sendPurchaseVGM
       -> ServiceTask  "Send Purchase VGM"            calls internalApiUrl (set by previous PATCH)
       -> ReceiveTask  "Wait for VGM Purchased"       PATCH by Certiweight (via EDC) with certificate ref
       -> ServiceTask  "Download Certificate"         no-op placeholder (replace with real download delegate)
@@ -39,7 +40,11 @@
 
         <!-- Pauses immediately after start. PATCH by Certiweight (via EDC) when order is confirmed. -->
         <receiveTask id="waitOrderCreated" name="Wait for Order Created"/>
-        <sequenceFlow id="flow2" sourceRef="waitOrderCreated" targetRef="waitMeasurementCreated"/>
+        <sequenceFlow id="flow2" sourceRef="waitOrderCreated" targetRef="waitTruckerAnnounced"/>
+
+        <!-- Pauses here. PATCH by Certiweight (via EDC) when trucker arrives at facility. -->
+        <receiveTask id="waitTruckerAnnounced" name="Wait for Trucker Announced"/>
+        <sequenceFlow id="flowTA" sourceRef="waitTruckerAnnounced" targetRef="waitMeasurementCreated"/>
 
         <!-- Pauses here. PATCH by Certiweight (via EDC) when weight is measured.
              This PATCH must include internalApiUrl + payloadData for sendPurchaseVGM. -->

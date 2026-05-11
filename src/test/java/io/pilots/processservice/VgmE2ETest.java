@@ -148,6 +148,20 @@ class VgmE2ETest {
         assertThat(shipPatch1.getBody().get("state")).isEqualTo("ORDER_CONFIRMED");
         assertThat(shipPatch1.getBody().get("version")).isEqualTo(2);
 
+        // Shipper is now paused at waitTruckerAnnounced — no new outbound call
+        assertThat(mockServer.getRequestCount()).isEqualTo(1);
+
+        // ── Step 2c: (Certiweight ERP → Shipper) advance waitTruckerAnnounced ──
+        // Simulates the cross-EDC PATCH that Certiweight sends when the truck arrives.
+
+        ResponseEntity<Map> shipPatchTA = patch(shipId, "2",
+                "TRUCKER_ANNOUNCED",
+                Map.of("transportbedrijf", "Van Moer Transport"));
+
+        assertThat(shipPatchTA.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(shipPatchTA.getBody().get("state")).isEqualTo("TRUCKER_ANNOUNCED");
+        assertThat(shipPatchTA.getBody().get("version")).isEqualTo(3);
+
         // Shipper is now paused at waitMeasurementCreated — no new outbound call
         assertThat(mockServer.getRequestCount()).isEqualTo(1);
 
@@ -179,17 +193,16 @@ class VgmE2ETest {
         // ── Step 3b: (Certiweight ERP → Shipper) advance waitMeasurementCreated
         // This PATCH must set internalApiUrl for the immediately-following sendPurchaseVGM.
 
-        ResponseEntity<Map> shipPatch2 = patch(shipId, "2",
+        ResponseEntity<Map> shipPatch2 = patch(shipId, "3",
                 "MEASUREMENT_RECEIVED",
                 Map.of(
                         "internalApiUrl", purchaseVgmUrl,
-                        "payloadData",    "{\"containerNr\":\"TCKU1234567\",\"grossMass\":24500}",
-                        "grossMass",      24500
+                        "payloadData",    "{\"containerNr\":\"TCKU1234567\",\"grossMass\":24500}"
                 ));
 
         assertThat(shipPatch2.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(shipPatch2.getBody().get("state")).isEqualTo("MEASUREMENT_RECEIVED");
-        assertThat(shipPatch2.getBody().get("version")).isEqualTo(3);
+        assertThat(shipPatch2.getBody().get("version")).isEqualTo(4);
 
         // sendPurchaseVGM must have fired synchronously within this PATCH
         RecordedRequest req3 = mockServer.takeRequest(2, TimeUnit.SECONDS);
@@ -228,16 +241,17 @@ class VgmE2ETest {
         // ── Step 5: (Certiweight ERP → Shipper) advance waitVGMPurchased ──────
         // taskDownloadCertificate is a no-op placeholder, then Shipper process ENDS.
 
-        ResponseEntity<Map> shipPatch3 = patch(shipId, "3",
+        ResponseEntity<Map> shipPatch3 = patch(shipId, "4",
                 "VGM_PURCHASED",
                 Map.of(
+                        "grossMass",      24500,
                         "certificateRef", "CERT-2026-001",
                         "certificateUrl", "https://certiweight.example.com/certs/CERT-2026-001.pdf"
                 ));
 
         assertThat(shipPatch3.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(shipPatch3.getBody().get("state")).isEqualTo("VGM_PURCHASED");
-        assertThat(shipPatch3.getBody().get("version")).isEqualTo(4);
+        assertThat(shipPatch3.getBody().get("version")).isEqualTo(5);
 
         // taskDownloadCertificate is a no-op — no further outbound calls
         assertThat(mockServer.getRequestCount()).isEqualTo(4);
@@ -252,7 +266,7 @@ class VgmE2ETest {
         ResponseEntity<Map> getShip = restTemplate.getForEntity(url("/serviceInstances/" + shipId), Map.class);
         assertThat(getShip.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(getShip.getBody().get("state")).isEqualTo("VGM_PURCHASED");
-        assertThat(getShip.getBody().get("version")).isEqualTo(4);
+        assertThat(getShip.getBody().get("version")).isEqualTo(5);
 
         // ── Verify both instances appear in LIST ──────────────────────────────
 
