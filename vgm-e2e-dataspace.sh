@@ -523,15 +523,15 @@ ok "Certiweight (P1): ${CERT_FINAL}"
 # ─────────────────────────────────────────────────────────────────────────────
 echo -e "" >&2
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}" >&2
-echo -e "${BOLD}║  ${GREEN}✓  Demo complete — both workflows finished successfully${RESET}${BOLD}       ║${RESET}" >&2
+echo -e "${BOLD}║  ${GREEN}✓  Demo complete — both workflows finished successfully${RESET}${BOLD}      ║${RESET}" >&2
 echo -e "${BOLD}╠══════════════════════════════════════════════════════════════╣${RESET}" >&2
 echo -e "${BOLD}║${RESET}                                                              ${BOLD}║${RESET}" >&2
-echo -e "${BOLD}║${RESET}  Certiweight ID : ${CERT_ID}  ${BOLD}║${RESET}" >&2
-echo -e "${BOLD}║${RESET}  Shipper ID     : ${SHIP_ID}  ${BOLD}║${RESET}" >&2
+echo -e "${BOLD}║${RESET}  Certiweight ID : ${CERT_ID}  ${BOLD}   ║${RESET}" >&2
+echo -e "${BOLD}║${RESET}  Shipper ID     : ${SHIP_ID}  ${BOLD}   ║${RESET}" >&2
 echo -e "${BOLD}║${RESET}                                                              ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}║${RESET}  Open the frontends to see the completed instances:          ${BOLD}║${RESET}" >&2
-echo -e "${BOLD}║${RESET}    ${CYAN}http://localhost:3002${RESET}  (Certiweight)                        ${BOLD}║${RESET}" >&2
-echo -e "${BOLD}║${RESET}    ${CYAN}http://localhost:3003${RESET}  (Shipper)                            ${BOLD}║${RESET}" >&2
+echo -e "${BOLD}║${RESET}    ${CYAN}http://localhost:3002${RESET}  (Certiweight)                      ${BOLD}║${RESET}" >&2
+echo -e "${BOLD}║${RESET}    ${CYAN}http://localhost:3003${RESET}  (Shipper)                          ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}║${RESET}                                                              ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}" >&2
 echo -e "" >&2
