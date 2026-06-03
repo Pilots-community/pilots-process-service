@@ -277,7 +277,7 @@ echo -e "${BOLD}║${RESET}  The Shipper uses the frontend at ${CYAN}http://loca
 echo -e "${BOLD}║${RESET}                                                              ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}║${RESET}  Flow:                                                        ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}║${RESET}    Shipper requests VGM  →  Certiweight weighs container      ${BOLD}║${RESET}" >&2
-echo -e "${BOLD}║${RESET}    →  Shipper confirms purchase  →  certificate issued        ${BOLD}║${RESET}" >&2
+echo -e "${BOLD}║${RESET}    →  Certiweight processes payment  →  certificate issued    ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}║${RESET}                                                              ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}║${RESET}  Cross-party calls go through the ${BOLD}Eclipse Dataspace (EDC)${RESET}.  ${BOLD}║${RESET}" >&2
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}" >&2
@@ -343,12 +343,6 @@ P2_TP=$(negotiate_edr "P2" "${P1_MGMT}" "${P2_PROTOCOL}" "${P2_ID}" "${P2_ASSET}
 P2_TOKEN=$(get_edr_token "${P1_MGMT}" "${P2_TP}")
 ok "Certiweight can now send updates to Shipper through the dataspace"
 
-step "Shipper → Certiweight channel"
-party P2 "Negotiating access to Certiweight's process service …"
-P1_TP=$(negotiate_edr "P1" "${P2_MGMT}" "${P1_PROTOCOL}" "${P1_ID}" "${P1_ASSET}")
-P1_TOKEN=$(get_edr_token "${P2_MGMT}" "${P1_TP}")
-ok "Shipper can now send updates to Certiweight through the dataspace"
-
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Section 2 — Channel verification"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -357,11 +351,6 @@ info "Certiweight reads Shipper's instances through the dataspace …"
 P2_LIST=$(edc_list_instances "${P2_DP}" "${P2_TOKEN}")
 P2_LIST_COUNT=$(echo "$P2_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
 ok "Certiweight can see Shipper's process service (${P2_LIST_COUNT} instance(s))"
-
-info "Shipper reads Certiweight's instances through the dataspace …"
-P1_LIST=$(edc_list_instances "${P1_DP}" "${P1_TOKEN}")
-P1_LIST_COUNT=$(echo "$P1_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
-ok "Shipper can see Certiweight's process service (${P1_LIST_COUNT} instance(s))"
 
 next "Start the VGM business flow" \
      "Certiweight receives the Shipper's VGM request and creates a weighing order"
@@ -389,8 +378,8 @@ CERT_BODY="{\"serviceDefinition\":\"certiweightVGMProcess\",
       {\"role\":\"customer\",\"party\":\"${P2_ID}\"}
     ],
     \"parameters\":{
-      \"internalApiUrl\":\"${ERP_URL}/order-created\",
-      \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"bookingNr\\\":\\\"${BOOKING_NR}\\\"}\",
+      \"containerNr\":\"${CONTAINER_NR}\",
+      \"bookingNr\":\"${BOOKING_NR}\",
       \"containernr\":\"${CONTAINER_NR}\",
       \"bookingnr\":\"${BOOKING_NR}\",
       \"shipperInstanceId\":\"${SHIP_ID}\"
@@ -400,43 +389,51 @@ CERT_RESP=$(ps_post "${P1_PS}" "$CERT_BODY")
 flow_in "Certiweight's process instance (P1 — ${P1_PS})" "$CERT_RESP"
 CERT_ID=$(echo "$CERT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 ok "Certiweight weighing job created: ${CERT_ID}"
+ok "Process is paused — waiting for Certiweight ERP to trigger the order notification"
+
+next "Certiweight ERP sends the order notification to its internal system" \
+     "Certiweight ERP → Certiweight process service (direct PATCH)"
+
+# ── Step 2a: Certiweight ERP triggers sendOrderCreated ────────────────────────
+step "Step 2a — Certiweight ERP: send order created notification"
+party P1 "ERP triggers sendOrderCreated for container ${CONTAINER_NR} …"
+RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "1" "ORDER_CREATED" \
+  "{\"internalApiUrl\":\"${ERP_URL}/order-created\",
+    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"bookingNr\\\":\\\"${BOOKING_NR}\\\"}\"}")
+flow_in "Certiweight process updated" "$RESP"
 notification "Certiweight ERP" "Order Created" "Container ${CONTAINER_NR} / Booking ${BOOKING_NR}"
-ok "Certiweight is now waiting for the truck to arrive at the facility"
+ok "Order created notification delivered (version $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
 
 next "Certiweight notifies the Shipper that the order has been confirmed" \
      "EDC data-plane — Certiweight → Shipper (policy-governed, bearer token)"
 
-# ── Step 2b: Certiweight ERP → Shipper (advance waitOrderCreated via EDC) ──────
-step "Step 2b of 5 — Order confirmed: Certiweight notifies Shipper  [EDC]"
+# ── Step 2b: Certiweight → Shipper ORDER_CONFIRMED (via EDC) ──────────────────
+step "Step 2b — Order confirmed: Certiweight notifies Shipper  [EDC]"
 party P1 "Sending ORDER_CONFIRMED to Shipper through the dataspace …"
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "1" "ORDER_CONFIRMED" \
   "{\"certiweightInstanceId\":\"${CERT_ID}\",\"containerNr\":\"${CONTAINER_NR}\"}")
 ok "Shipper received: ORDER_CONFIRMED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
-party P2 "Shipper is now waiting for the weight measurement"
+party P2 "Shipper is now waiting for the trucker to be announced"
 
-next "The truck arrives at Certiweight's facility — container is weighed" \
-     "Direct call (Certiweight's own process service)"
+next "Truck TRK-42 arrives at the facility — Certiweight ERP sends trucker announcement" \
+     "Certiweight ERP → Certiweight process service (direct PATCH)"
 
-# ── Step 3: Trucker arrives – Certiweight self-PATCH ──────────────────────────
-step "Step 3 of 5 — Truck arrives, container weighed  [CERTIWEIGHT SIDE]"
-party P1 "Truck TRK-42 has arrived — recording weight measurement …"
-RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "1" "TRUCKER_ANNOUNCED" \
-  "{\"internalApiUrl\":\"${ERP_URL}/measurement-created\",
-    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"grossMass\\\":24500,\\\"unit\\\":\\\"kg\\\"}\",
-    \"truckId\":\"TRK-42\",
-    \"transportbedrijf\":\"${TRANSPORT_CO}\",
-    \"grossMass\":24500}")
-flow_in "Certiweight's process instance" "$RESP"
-ok "Certiweight state: TRUCKER_ANNOUNCED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
-notification "Certiweight ERP" "Measurement Created" "Container ${CONTAINER_NR} — Gross mass: 24 500 kg"
-ok "Certiweight is now waiting for the Shipper to confirm the VGM purchase"
+# ── Step 3a: Certiweight ERP triggers sendTruckerAnnounced ────────────────────
+step "Step 3a — Certiweight ERP: send trucker announcement"
+party P1 "ERP triggers sendTruckerAnnounced — truck TRK-42 at facility …"
+RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "2" "TRUCKER_ANNOUNCED" \
+  "{\"truckerApiUrl\":\"${ERP_URL}/trucker-announced\",
+    \"truckerPayload\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"truckId\\\":\\\"TRK-42\\\"}\"}")
+flow_in "Certiweight process updated" "$RESP"
+notification "Certiweight ERP" "Trucker Announced" "Truck TRK-42 announced for container ${CONTAINER_NR}"
+ok "Trucker announcement delivered (version $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
 
 next "Certiweight notifies the Shipper that the trucker has arrived" \
      "EDC data-plane — Certiweight → Shipper (policy-governed, bearer token)"
 
-# ── Step 3b: Certiweight ERP → Shipper (advance waitTruckerAnnounced via EDC) ───
-step "Step 3b of 5 — Trucker announced: Certiweight notifies Shipper  [EDC]"
+# ── Step 3b: Certiweight → Shipper TRUCKER_ANNOUNCED (via EDC) ────────────────
+step "Step 3b — Trucker announced: Certiweight notifies Shipper  [EDC]"
 party P1 "Sending TRUCKER_ANNOUNCED to Shipper through the dataspace …"
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "2" "TRUCKER_ANNOUNCED" \
@@ -444,11 +441,25 @@ RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
 ok "Shipper received: TRUCKER_ANNOUNCED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
 party P2 "Shipper sees the trucker has arrived — waiting for weight measurement"
 
+next "Container weighed — Certiweight ERP sends the measurement to its internal system" \
+     "Certiweight ERP → Certiweight process service (direct PATCH)"
+
+# ── Step 4a: Certiweight ERP triggers sendMeasurementCreated ──────────────────
+step "Step 4a — Certiweight ERP: send weight measurement"
+party P1 "ERP triggers sendMeasurementCreated — gross mass 24 500 kg …"
+RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "3" "MEASUREMENT_CREATED" \
+  "{\"measurementApiUrl\":\"${ERP_URL}/measurement-created\",
+    \"measurementPayload\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"grossMass\\\":24500,\\\"unit\\\":\\\"kg\\\"}\"}")
+flow_in "Certiweight process updated" "$RESP"
+notification "Certiweight ERP" "Measurement Created" "Container ${CONTAINER_NR} — Gross mass: 24 500 kg"
+ok "Measurement delivered (version $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
+ok "Certiweight is now waiting for the Shipper to confirm the VGM purchase"
+
 next "Certiweight sends the weight measurement to the Shipper for VGM purchase confirmation" \
      "EDC data-plane — Certiweight → Shipper (policy-governed, bearer token)"
 
-# ── Step 3c: Certiweight ERP → Shipper (advance waitMeasurementCreated via EDC) ─
-step "Step 3c of 5 — Measurement shared: Certiweight notifies Shipper  [EDC]"
+# ── Step 4b: Certiweight → Shipper MEASUREMENT_RECEIVED (via EDC) ─────────────
+step "Step 4b — Measurement shared: Certiweight notifies Shipper  [EDC]"
 party P1 "Sending MEASUREMENT_RECEIVED (24 500 kg) to Shipper through the dataspace …"
 RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
   "${SHIP_ID}" "3" "MEASUREMENT_RECEIVED" \
@@ -458,18 +469,18 @@ ok "Shipper received: MEASUREMENT_RECEIVED (version $(echo $RESP | python3 -c "i
 notification "Shipper TMS" "Purchase VGM" "Container ${CONTAINER_NR} — measurement received, weight withheld"
 ok "Shipper is now waiting for the VGM certificate"
 
-next "Shipper confirms the VGM purchase — sends payment confirmation to Certiweight" \
-     "EDC data-plane — Shipper → Certiweight (policy-governed, bearer token)"
+next "Certiweight ERP processes the VGM purchase on its own platform" \
+     "Certiweight ERP → Certiweight process service (direct PATCH)"
 
-# ── Step 4: Shipper TMS → Certiweight (advance waitPurchaseVGM via EDC) ─────────
-step "Step 4 of 5 — Shipper confirms VGM purchase  [EDC]"
-party P2 "Sending PURCHASE_CONFIRMED to Certiweight through the dataspace …"
-RESP=$(edc_patch "${P1_DP}" "${P1_TOKEN}" \
-  "${CERT_ID}" "2" "PURCHASE_CONFIRMED" \
+# ── Step 4: Certiweight ERP processes payment (advance waitPurchaseVGM directly) ──
+step "Step 4 of 5 — Certiweight ERP: payment processed  [CERTIWEIGHT SIDE]"
+party P1 "ERP confirms VGM payment processed — issuing certificate CERT-2026-001 …"
+RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "4" "PURCHASE_CONFIRMED" \
   "{\"internalApiUrl\":\"${ERP_URL}/vgm-purchased\",
     \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\"}")
-ok "Certiweight received: PURCHASE_CONFIRMED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
+flow_in "Certiweight process updated" "$RESP"
 notification "Certiweight ERP" "VGM Certificate Issued" "Certificate: CERT-2026-001 — Payment processed"
+ok "Certiweight payment processed (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
 ok "Certiweight weighing process is now COMPLETE"
 
 next "Certiweight delivers the VGM certificate to the Shipper" \
@@ -491,7 +502,7 @@ ok "Shipper VGM process is now COMPLETE"
 hdr "Section 4 — Final state verification"
 # ─────────────────────────────────────────────────────────────────────────────
 
-info "Reading final states through the EDC data-plane …"
+info "Reading final states …"
 P2_FINAL=$(edc_list_instances "${P2_DP}" "${P2_TOKEN}")
 P2_SHIP_STATE=$(echo "$P2_FINAL" | python3 -c "
 import sys, json
@@ -503,16 +514,9 @@ for i in items:
 " 2>/dev/null || echo "not found")
 ok "Shipper final state (via EDC):      ${P2_SHIP_STATE}"
 
-P1_FINAL=$(edc_list_instances "${P1_DP}" "${P1_TOKEN}")
-P1_CERT_STATE=$(echo "$P1_FINAL" | python3 -c "
-import sys, json
-items = json.load(sys.stdin).get('items', [])
-for i in items:
-    if i.get('id') == '${CERT_ID}':
-        print(i.get('state'))
-        break
-" 2>/dev/null || echo "not found")
-ok "Certiweight final state (via EDC):  ${P1_CERT_STATE}"
+P1_CERT_STATE=$(curl -sf "${P1_PS}/serviceInstances/${CERT_ID}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])" 2>/dev/null || echo "not found")
+ok "Certiweight final state (direct):   ${P1_CERT_STATE}"
 
 info "Confirming directly from each process service …"
 SHIP_FINAL=$(curl -sf "${P2_PS}/serviceInstances/${SHIP_ID}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['state'], '(version ' + str(d['version']) + ')')")

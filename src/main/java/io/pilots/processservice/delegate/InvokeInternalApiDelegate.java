@@ -2,13 +2,15 @@ package io.pilots.processservice.delegate;
 
 import org.flowable.engine.delegate.BpmnError;
 import org.flowable.engine.delegate.DelegateExecution;
+import org.flowable.engine.delegate.ExecutionListener;
 import org.flowable.engine.delegate.JavaDelegate;
 import org.springframework.http.MediaType;
-import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
 /**
- * Flowable JavaDelegate that makes a synchronous HTTP POST to an internal application.
+ * Flowable delegate that makes a synchronous HTTP POST to an internal application.
+ * Implements both {@link JavaDelegate} (for serviceTask) and {@link ExecutionListener}
+ * (for intermediateThrowEvent execution listeners).
  *
  * Required process variables:
  * <ul>
@@ -16,25 +18,33 @@ import org.springframework.web.client.RestClient;
  *   <li>{@code payloadData}     – request body string (typically JSON); may be null</li>
  * </ul>
  *
- * On a non-2xx response a {@link BpmnError} with code {@code INTERNAL_API_ERROR} is thrown
- * so it can be caught by a BPMN boundary error event on the service task.
- *
- * Reference from a BPMN service task:
- * <pre>{@code flowable:delegateExpression="${invokeInternalApiDelegate}"}</pre>
+ * On a non-2xx response a {@link BpmnError} with code {@code INTERNAL_API_ERROR} is thrown.
  */
-@Component
-public class InvokeInternalApiDelegate implements JavaDelegate {
+public class InvokeInternalApiDelegate implements JavaDelegate, ExecutionListener {
 
     private final RestClient restClient;
+    private final String urlVariable;
+    private final String payloadVariable;
 
     public InvokeInternalApiDelegate(RestClient restClient) {
+        this(restClient, "internalApiUrl", "payloadData");
+    }
+
+    public InvokeInternalApiDelegate(RestClient restClient, String urlVariable, String payloadVariable) {
         this.restClient = restClient;
+        this.urlVariable = urlVariable;
+        this.payloadVariable = payloadVariable;
+    }
+
+    @Override
+    public void notify(DelegateExecution execution) {
+        execute(execution);
     }
 
     @Override
     public void execute(DelegateExecution execution) {
-        String url = (String) execution.getVariable("internalApiUrl");
-        String payload = (String) execution.getVariable("payloadData");
+        String url = (String) execution.getVariable(urlVariable);
+        String payload = (String) execution.getVariable(payloadVariable);
 
         if (url == null || url.isBlank()) {
             throw new BpmnError("INTERNAL_API_ERROR",

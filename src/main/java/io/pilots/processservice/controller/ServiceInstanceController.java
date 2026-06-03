@@ -17,6 +17,7 @@ import org.flowable.engine.RuntimeService;
 import org.flowable.engine.TaskService;
 import org.flowable.engine.history.HistoricProcessInstance;
 import org.flowable.engine.history.HistoricProcessInstanceQuery;
+import org.flowable.eventsubscription.api.EventSubscription;
 import org.flowable.engine.runtime.Execution;
 import org.flowable.engine.runtime.ProcessInstance;
 import org.flowable.task.api.Task;
@@ -196,21 +197,7 @@ public class ServiceInstanceController implements ServiceInstancesApi {
                 ? patch.getServiceDefinition()
                 : URI.create(pi.getProcessDefinitionKey());
 
-        // Advance the process: userTask → complete(), receiveTask → trigger().
-        Task task = taskService.createTaskQuery()
-                .processInstanceId(flowableId)
-                .singleResult();
-        if (task != null) {
-            taskService.complete(task.getId());
-        } else {
-            Execution waiting = runtimeService.createExecutionQuery()
-                    .processInstanceId(flowableId)
-                    .onlyChildExecutions()
-                    .singleResult();
-            if (waiting != null) {
-                runtimeService.trigger(waiting.getId());
-            }
-        }
+        advanceProcess(flowableId);
 
         OffsetDateTime now = OffsetDateTime.now();
 
@@ -257,6 +244,28 @@ public class ServiceInstanceController implements ServiceInstancesApi {
 
         runtimeService.deleteProcessInstance(flowableId, "Deleted via API");
         return ResponseEntity.noContent().build();
+    }
+
+    @org.springframework.web.bind.annotation.GetMapping("/serviceInstances/{id}/currentActivities")
+    public ResponseEntity<Map<String, Object>> getCurrentActivities(
+            @org.springframework.web.bind.annotation.PathVariable("id") UUID id) {
+        ProcessInstance pi = runtimeService.createProcessInstanceQuery()
+                .processInstanceBusinessKey(id.toString())
+                .singleResult();
+
+        List<String> activities;
+        if (pi != null) {
+            activities = runtimeService.getActiveActivityIds(pi.getId());
+        } else {
+            HistoricProcessInstance hpi = historyService
+                    .createHistoricProcessInstanceQuery()
+                    .processInstanceBusinessKey(id.toString())
+                    .singleResult();
+            if (hpi == null) return ResponseEntity.notFound().build();
+            activities = List.of();
+        }
+
+        return ResponseEntity.ok(Map.of("activities", activities));
     }
 
     @Override
@@ -470,21 +479,7 @@ public class ServiceInstanceController implements ServiceInstancesApi {
         updates.put("_version", newVersion);
         runtimeService.setVariables(flowableId, updates);
 
-        // Advance the process: userTask → complete(), receiveTask → trigger().
-        Task task = taskService.createTaskQuery()
-                .processInstanceId(flowableId)
-                .singleResult();
-        if (task != null) {
-            taskService.complete(task.getId());
-        } else {
-            Execution waiting = runtimeService.createExecutionQuery()
-                    .processInstanceId(flowableId)
-                    .onlyChildExecutions()
-                    .singleResult();
-            if (waiting != null) {
-                runtimeService.trigger(waiting.getId());
-            }
-        }
+        advanceProcess(flowableId);
 
         OffsetDateTime now = OffsetDateTime.now();
 
@@ -513,6 +508,39 @@ public class ServiceInstanceController implements ServiceInstancesApi {
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Advance the process instance one step. Tried in priority order:
+     * 1. Active userTask → taskService.complete()
+     * 2. Waiting intermediateCatchEvent with message subscription → messageEventReceived()
+     * 3. Waiting receiveTask → runtimeService.trigger()
+     */
+    private void advanceProcess(String flowableId) {
+        Task task = taskService.createTaskQuery()
+                .processInstanceId(flowableId)
+                .singleResult();
+        if (task != null) {
+            taskService.complete(task.getId());
+            return;
+        }
+
+        EventSubscription sub = runtimeService.createEventSubscriptionQuery()
+                .processInstanceId(flowableId)
+                .eventType("message")
+                .singleResult();
+        if (sub != null) {
+            runtimeService.messageEventReceived(sub.getEventName(), sub.getExecutionId());
+            return;
+        }
+
+        Execution waiting = runtimeService.createExecutionQuery()
+                .processInstanceId(flowableId)
+                .onlyChildExecutions()
+                .singleResult();
+        if (waiting != null) {
+            runtimeService.trigger(waiting.getId());
+        }
+    }
 
     private int readVersion(Map<String, Object> vars) {
         Object v = vars.get("_version");

@@ -5,75 +5,194 @@
 
   Flow:
     Start
-      -> ServiceTask  "Send Order Created"       calls internalApiUrl (set at POST time)
-      -> ReceiveTask  "Wait for Trucker"          PATCH by Certiweight's own system when trucker arrives
-                                                  PATCH must also set internalApiUrl for next ServiceTask
-      -> ServiceTask  "Send Measurement Created"  calls internalApiUrl (set by previous PATCH)
-      -> ReceiveTask  "Wait for Purchase VGM"     PATCH by Shipper (through EDC)
-                                                  PATCH must also set internalApiUrl for sendVGMPurchased
-      -> ServiceTask  "Process Payment"           no-op placeholder (replace with real payment delegate)
-      -> ServiceTask  "Create Certificate"        no-op placeholder (replace with real cert delegate)
-      -> ServiceTask  "Send VGM Purchased"        calls internalApiUrl (set by Shipper PATCH)
+      -> ReceiveTask "Wait to Send Order"         ERP PATCHes → triggers sendOrderCreated
+      -> ThrowEvent  "Send Order Created"          calls internalApiUrl + payloadData
+      -> ReceiveTask "Wait to Send Trucker"        ERP PATCHes → triggers sendTruckerAnnounced
+      -> ThrowEvent  "Send Trucker Announced"      calls truckerApiUrl + truckerPayload
+      -> ReceiveTask "Wait to Send Measurement"    ERP PATCHes → triggers sendMeasurementCreated
+      -> ThrowEvent  "Send Measurement Created"    calls measurementApiUrl + measurementPayload
+      -> CatchEvent  "Wait for Payment Processed"    Certiweight ERP PATCHes directly
+      -> ServiceTask "Process Payment"             no-op placeholder
+      -> ServiceTask "Create Certificate"          no-op placeholder
+      -> ThrowEvent  "Send VGM Purchased"          calls internalApiUrl + payloadData
     End
-
-  Required process variables at start (POST parameters):
-    internalApiUrl  - URL to notify when order is created (e.g. http://certiweight-erp/order-created)
-    payloadData     - JSON body for the order created notification
-
-  Variables set on each subsequent PATCH (before triggering the next ServiceTask):
-    internalApiUrl  - overwritten with the URL for the next outbound notification
-    payloadData     - overwritten with the payload for that notification
 -->
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
              xmlns:flowable="http://flowable.org/bpmn"
+             xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+             xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+             xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
              targetNamespace="https://example.com/lod/vgm">
+
+    <message id="msgPurchaseVGM" name="PurchaseVGM"/>
 
     <process id="certiweightVGMProcess"
              name="Certiweight LOD VGM Process"
              isExecutable="true">
 
         <startEvent id="startEvent" name="Start VGM Workflow"/>
-        <sequenceFlow id="flow1" sourceRef="startEvent" targetRef="sendOrderCreated"/>
+        <sequenceFlow id="flow0" sourceRef="startEvent" targetRef="waitToSendOrder"/>
 
-        <serviceTask id="sendOrderCreated"
-                     name="Send Order Created"
-                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
-        <sequenceFlow id="flow2" sourceRef="sendOrderCreated" targetRef="waitTruckerAnnounced"/>
+        <!-- ERP provides order data via PATCH; this receive task unblocks sendOrderCreated -->
+        <receiveTask id="waitToSendOrder" name="Wait to Send Order"/>
+        <sequenceFlow id="flow1" sourceRef="waitToSendOrder" targetRef="sendOrderCreated"/>
 
-        <!-- Pauses here. PATCH by Certiweight when trucker arrives at facility.
-             Include updated internalApiUrl + payloadData for sendMeasurementCreated. -->
-        <receiveTask id="waitTruckerAnnounced" name="Wait for Trucker Announcement"/>
-        <sequenceFlow id="flow3" sourceRef="waitTruckerAnnounced" targetRef="sendMeasurementCreated"/>
+        <intermediateThrowEvent id="sendOrderCreated" name="Send Order Created">
+            <extensionElements>
+                <flowable:executionListener event="start"
+                    delegateExpression="${invokeInternalApiDelegate}"/>
+            </extensionElements>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow2" sourceRef="sendOrderCreated" targetRef="waitToSendTrucker"/>
 
-        <serviceTask id="sendMeasurementCreated"
-                     name="Send Measurement Created"
-                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
-        <sequenceFlow id="flow4" sourceRef="sendMeasurementCreated" targetRef="waitPurchaseVGM"/>
+        <!-- ERP provides trucker data via PATCH; this receive task unblocks sendTruckerAnnounced -->
+        <receiveTask id="waitToSendTrucker" name="Wait to Send Trucker"/>
+        <sequenceFlow id="flow3" sourceRef="waitToSendTrucker" targetRef="sendTruckerAnnounced"/>
 
-        <!-- Pauses here. PATCH by Shipper (via EDC) when they confirm purchase.
-             Include updated internalApiUrl + payloadData for sendVGMPurchased. -->
-        <receiveTask id="waitPurchaseVGM" name="Wait for Purchase VGM"/>
-        <sequenceFlow id="flow5" sourceRef="waitPurchaseVGM" targetRef="taskProcessPayment"/>
+        <intermediateThrowEvent id="sendTruckerAnnounced" name="Send Trucker Announced">
+            <extensionElements>
+                <flowable:executionListener event="start"
+                    delegateExpression="${invokeTruckerApiDelegate}"/>
+            </extensionElements>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow4" sourceRef="sendTruckerAnnounced" targetRef="waitToSendMeasurement"/>
 
-        <!-- Placeholder: replace flowable:expression with a real payment delegate when ready. -->
+        <!-- ERP provides measurement data via PATCH; this receive task unblocks sendMeasurementCreated -->
+        <receiveTask id="waitToSendMeasurement" name="Wait to Send Measurement"/>
+        <sequenceFlow id="flow5" sourceRef="waitToSendMeasurement" targetRef="sendMeasurementCreated"/>
+
+        <intermediateThrowEvent id="sendMeasurementCreated" name="Send Measurement Created">
+            <extensionElements>
+                <flowable:executionListener event="start"
+                    delegateExpression="${invokeMeasurementApiDelegate}"/>
+            </extensionElements>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow6" sourceRef="sendMeasurementCreated" targetRef="waitPurchaseVGM"/>
+
+        <!-- Certiweight ERP PATCHes this after processing payment on its own platform -->
+        <intermediateCatchEvent id="waitPurchaseVGM" name="Wait for Payment Processed">
+            <messageEventDefinition messageRef="msgPurchaseVGM"/>
+        </intermediateCatchEvent>
+        <sequenceFlow id="flow7" sourceRef="waitPurchaseVGM" targetRef="taskProcessPayment"/>
+
         <serviceTask id="taskProcessPayment"
                      name="Process Payment"
                      flowable:expression="${true}"/>
-        <sequenceFlow id="flow6" sourceRef="taskProcessPayment" targetRef="taskCreateCertificate"/>
+        <sequenceFlow id="flow8" sourceRef="taskProcessPayment" targetRef="taskCreateCertificate"/>
 
-        <!-- Placeholder: replace flowable:expression with a real certificate delegate when ready. -->
         <serviceTask id="taskCreateCertificate"
                      name="Create Certificate"
                      flowable:expression="${true}"/>
-        <sequenceFlow id="flow7" sourceRef="taskCreateCertificate" targetRef="sendVGMPurchased"/>
+        <sequenceFlow id="flow9" sourceRef="taskCreateCertificate" targetRef="sendVGMPurchased"/>
 
-        <serviceTask id="sendVGMPurchased"
-                     name="Send VGM Purchased"
-                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
-        <sequenceFlow id="flow8" sourceRef="sendVGMPurchased" targetRef="endEvent"/>
+        <intermediateThrowEvent id="sendVGMPurchased" name="Send VGM Purchased">
+            <extensionElements>
+                <flowable:executionListener event="start"
+                    delegateExpression="${invokeInternalApiDelegate}"/>
+            </extensionElements>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow10" sourceRef="sendVGMPurchased" targetRef="endEvent"/>
 
         <endEvent id="endEvent" name="Workflow Complete"/>
 
     </process>
+
+    <bpmndi:BPMNDiagram id="BPMNDiagram_certiweightVGMProcess">
+        <bpmndi:BPMNPlane id="BPMNPlane_certiweightVGMProcess" bpmnElement="certiweightVGMProcess">
+
+            <bpmndi:BPMNShape id="BPMNShape_startEvent" bpmnElement="startEvent">
+                <dc:Bounds x="100" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="76" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_waitToSendOrder" bpmnElement="waitToSendOrder">
+                <dc:Bounds x="186" y="160" width="100" height="80"/>
+                <bpmndi:BPMNLabel/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_sendOrderCreated" bpmnElement="sendOrderCreated">
+                <dc:Bounds x="336" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="312" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_waitToSendTrucker" bpmnElement="waitToSendTrucker">
+                <dc:Bounds x="422" y="160" width="100" height="80"/>
+                <bpmndi:BPMNLabel/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_sendTruckerAnnounced" bpmnElement="sendTruckerAnnounced">
+                <dc:Bounds x="572" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="548" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_waitToSendMeasurement" bpmnElement="waitToSendMeasurement">
+                <dc:Bounds x="658" y="160" width="100" height="80"/>
+                <bpmndi:BPMNLabel/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_sendMeasurementCreated" bpmnElement="sendMeasurementCreated">
+                <dc:Bounds x="808" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="784" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_waitPurchaseVGM" bpmnElement="waitPurchaseVGM">
+                <dc:Bounds x="894" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="870" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_taskProcessPayment" bpmnElement="taskProcessPayment">
+                <dc:Bounds x="980" y="160" width="100" height="80"/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_taskCreateCertificate" bpmnElement="taskCreateCertificate">
+                <dc:Bounds x="1130" y="160" width="100" height="80"/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_sendVGMPurchased" bpmnElement="sendVGMPurchased">
+                <dc:Bounds x="1280" y="182" width="36" height="36"/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_endEvent" bpmnElement="endEvent">
+                <dc:Bounds x="1366" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="1344" y="225" width="80" height="14"/></bpmndi:BPMNLabel>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNEdge id="BPMNEdge_flow0" bpmnElement="flow0">
+                <di:waypoint x="136" y="200"/><di:waypoint x="186" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow1" bpmnElement="flow1">
+                <di:waypoint x="286" y="200"/><di:waypoint x="336" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow2" bpmnElement="flow2">
+                <di:waypoint x="372" y="200"/><di:waypoint x="422" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow3" bpmnElement="flow3">
+                <di:waypoint x="522" y="200"/><di:waypoint x="572" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow4" bpmnElement="flow4">
+                <di:waypoint x="608" y="200"/><di:waypoint x="658" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow5" bpmnElement="flow5">
+                <di:waypoint x="758" y="200"/><di:waypoint x="808" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow6" bpmnElement="flow6">
+                <di:waypoint x="844" y="200"/><di:waypoint x="894" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow7" bpmnElement="flow7">
+                <di:waypoint x="930" y="200"/><di:waypoint x="980" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow8" bpmnElement="flow8">
+                <di:waypoint x="1080" y="200"/><di:waypoint x="1130" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow9" bpmnElement="flow9">
+                <di:waypoint x="1230" y="200"/><di:waypoint x="1280" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow10" bpmnElement="flow10">
+                <di:waypoint x="1316" y="200"/><di:waypoint x="1366" y="200"/>
+            </bpmndi:BPMNEdge>
+
+        </bpmndi:BPMNPlane>
+    </bpmndi:BPMNDiagram>
+
 </definitions>
