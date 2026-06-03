@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.flowable.common.engine.api.delegate.Expression;
 import org.flowable.engine.delegate.BpmnError;
 import org.flowable.engine.delegate.DelegateExecution;
+import org.flowable.engine.delegate.ExecutionListener;
 import org.flowable.engine.delegate.JavaDelegate;
 import org.springframework.http.MediaType;
 import org.springframework.web.client.RestClient;
@@ -34,7 +35,7 @@ import org.springframework.web.client.RestClient;
  *     </extensionElements>
  *   </serviceTask>
  */
-public class EdcNotifyDelegate implements JavaDelegate {
+public class EdcNotifyDelegate implements JavaDelegate, ExecutionListener {
 
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
@@ -47,6 +48,11 @@ public class EdcNotifyDelegate implements JavaDelegate {
     public EdcNotifyDelegate(RestClient restClient, ObjectMapper objectMapper) {
         this.restClient   = restClient;
         this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public void notify(DelegateExecution execution) {
+        execute(execution);
     }
 
     @Override

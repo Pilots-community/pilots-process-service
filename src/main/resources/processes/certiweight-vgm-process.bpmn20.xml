@@ -5,21 +5,25 @@
 
   Flow:
     Start
-      -> ReceiveTask  "Wait to Send Order"            ERP PATCHes -> triggers sendOrderCreated
-      -> ServiceTask  "Send Order Created"             httpPostDelegate with field injection
-      -> ServiceTask  "Notify Shipper Order Created"   edcNotifyDelegate (no-op if no EDC token)
-      -> ReceiveTask  "Wait to Send Trucker"           ERP PATCHes -> triggers sendTruckerAnnounced
-      -> ServiceTask  "Send Trucker Announced"         httpPostDelegate with field injection
-      -> ServiceTask  "Notify Shipper Trucker Announced" edcNotifyDelegate
-      -> ReceiveTask  "Wait to Send Measurement"       ERP PATCHes -> triggers sendMeasurementCreated
-      -> ServiceTask  "Send Measurement Created"       httpPostDelegate with field injection
-      -> ServiceTask  "Notify Shipper Measurement Created" edcNotifyDelegate
-      -> CatchEvent   "Wait for Payment Processed"     Certiweight ERP PATCHes directly
-      -> ServiceTask  "Process Payment"                no-op placeholder
-      -> ServiceTask  "Create Certificate"             no-op placeholder
-      -> ServiceTask  "Send VGM Purchased"             httpPostDelegate with field injection
-      -> ServiceTask  "Notify Shipper VGM Purchased"   edcNotifyDelegate
+      -> ReceiveTask           "Wait to Send Order"       ERP PATCHes to unblock
+      -> ServiceTask           "Send Order Created"       internal ERP call (httpPostDelegate)
+      -> IntermediateThrowEvent "Order Created"           contracted event, notifies Shipper via EDC
+      -> ReceiveTask           "Wait to Send Trucker"     ERP PATCHes to unblock
+      -> ServiceTask           "Send Trucker Announced"   internal ERP call
+      -> IntermediateThrowEvent "Trucker Announced"       contracted event, notifies Shipper via EDC
+      -> ReceiveTask           "Wait to Send Measurement" ERP PATCHes to unblock
+      -> ServiceTask           "Send Measurement Created" internal ERP call
+      -> IntermediateThrowEvent "Measurement Created"     contracted event, notifies Shipper via EDC
+      -> IntermediateCatchEvent "Wait for Payment"        Certiweight ERP PATCHes directly
+      -> ServiceTask           "Process Payment"          internal (no-op placeholder)
+      -> ServiceTask           "Create Certificate"       internal (no-op placeholder)
+      -> ServiceTask           "Send VGM Purchased"       internal ERP call
+      -> IntermediateThrowEvent "VGM Purchased"           contracted event, notifies Shipper via EDC
     End
+
+  Throw events carry the contracted interface: edcNotifyDelegate fires as an execution
+  listener, sending the agreed state and parameters to the Shipper through the EDC data-plane.
+  Tasks between events are internal to Certiweight and can change without affecting the Shipper.
 -->
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -38,7 +42,6 @@
         <startEvent id="startEvent" name="Start VGM Workflow"/>
         <sequenceFlow id="flow0" sourceRef="startEvent" targetRef="waitToSendOrder"/>
 
-        <!-- ERP provides order data via PATCH; this receive task unblocks sendOrderCreated -->
         <receiveTask id="waitToSendOrder" name="Wait to Send Order"/>
         <sequenceFlow id="flow1" sourceRef="waitToSendOrder" targetRef="sendOrderCreated"/>
 
@@ -50,20 +53,20 @@
                 <flowable:field name="payload" expression="${payloadData}"/>
             </extensionElements>
         </serviceTask>
-        <sequenceFlow id="flow2" sourceRef="sendOrderCreated" targetRef="notifyShipperOrderCreated"/>
+        <sequenceFlow id="flow2" sourceRef="sendOrderCreated" targetRef="throwOrderCreated"/>
 
-        <serviceTask id="notifyShipperOrderCreated"
-                     name="Notify Shipper Order Created"
-                     flowable:delegateExpression="${edcNotifyDelegate}">
+        <intermediateThrowEvent id="throwOrderCreated" name="Order Created">
             <extensionElements>
-                <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
-                <flowable:field name="notifyState"      stringValue="ORDER_CONFIRMED"/>
-                <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                <flowable:executionListener event="start"
+                        delegateExpression="${edcNotifyDelegate}">
+                    <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
+                    <flowable:field name="notifyState"      stringValue="ORDER_CONFIRMED"/>
+                    <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                </flowable:executionListener>
             </extensionElements>
-        </serviceTask>
-        <sequenceFlow id="flow2b" sourceRef="notifyShipperOrderCreated" targetRef="waitToSendTrucker"/>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow2b" sourceRef="throwOrderCreated" targetRef="waitToSendTrucker"/>
 
-        <!-- ERP provides trucker data via PATCH; this receive task unblocks sendTruckerAnnounced -->
         <receiveTask id="waitToSendTrucker" name="Wait to Send Trucker"/>
         <sequenceFlow id="flow3" sourceRef="waitToSendTrucker" targetRef="sendTruckerAnnounced"/>
 
@@ -75,20 +78,20 @@
                 <flowable:field name="payload" expression="${truckerPayload}"/>
             </extensionElements>
         </serviceTask>
-        <sequenceFlow id="flow4" sourceRef="sendTruckerAnnounced" targetRef="notifyShipperTruckerAnnounced"/>
+        <sequenceFlow id="flow4" sourceRef="sendTruckerAnnounced" targetRef="throwTruckerAnnounced"/>
 
-        <serviceTask id="notifyShipperTruckerAnnounced"
-                     name="Notify Shipper Trucker Announced"
-                     flowable:delegateExpression="${edcNotifyDelegate}">
+        <intermediateThrowEvent id="throwTruckerAnnounced" name="Trucker Announced">
             <extensionElements>
-                <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
-                <flowable:field name="notifyState"      stringValue="TRUCKER_ANNOUNCED"/>
-                <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                <flowable:executionListener event="start"
+                        delegateExpression="${edcNotifyDelegate}">
+                    <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
+                    <flowable:field name="notifyState"      stringValue="TRUCKER_ANNOUNCED"/>
+                    <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                </flowable:executionListener>
             </extensionElements>
-        </serviceTask>
-        <sequenceFlow id="flow4b" sourceRef="notifyShipperTruckerAnnounced" targetRef="waitToSendMeasurement"/>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow4b" sourceRef="throwTruckerAnnounced" targetRef="waitToSendMeasurement"/>
 
-        <!-- ERP provides measurement data via PATCH; this receive task unblocks sendMeasurementCreated -->
         <receiveTask id="waitToSendMeasurement" name="Wait to Send Measurement"/>
         <sequenceFlow id="flow5" sourceRef="waitToSendMeasurement" targetRef="sendMeasurementCreated"/>
 
@@ -100,20 +103,20 @@
                 <flowable:field name="payload" expression="${measurementPayload}"/>
             </extensionElements>
         </serviceTask>
-        <sequenceFlow id="flow6" sourceRef="sendMeasurementCreated" targetRef="notifyShipperMeasurementCreated"/>
+        <sequenceFlow id="flow6" sourceRef="sendMeasurementCreated" targetRef="throwMeasurementCreated"/>
 
-        <serviceTask id="notifyShipperMeasurementCreated"
-                     name="Notify Shipper Measurement Created"
-                     flowable:delegateExpression="${edcNotifyDelegate}">
+        <intermediateThrowEvent id="throwMeasurementCreated" name="Measurement Created">
             <extensionElements>
-                <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
-                <flowable:field name="notifyState"      stringValue="MEASUREMENT_RECEIVED"/>
-                <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                <flowable:executionListener event="start"
+                        delegateExpression="${edcNotifyDelegate}">
+                    <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
+                    <flowable:field name="notifyState"      stringValue="MEASUREMENT_RECEIVED"/>
+                    <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                </flowable:executionListener>
             </extensionElements>
-        </serviceTask>
-        <sequenceFlow id="flow6b" sourceRef="notifyShipperMeasurementCreated" targetRef="waitPurchaseVGM"/>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow6b" sourceRef="throwMeasurementCreated" targetRef="waitPurchaseVGM"/>
 
-        <!-- Certiweight ERP PATCHes this after processing payment on its own platform -->
         <intermediateCatchEvent id="waitPurchaseVGM" name="Wait for Payment Processed">
             <messageEventDefinition messageRef="msgPurchaseVGM"/>
         </intermediateCatchEvent>
@@ -137,18 +140,19 @@
                 <flowable:field name="payload" expression="${payloadData}"/>
             </extensionElements>
         </serviceTask>
-        <sequenceFlow id="flow10" sourceRef="sendVGMPurchased" targetRef="notifyShipperVGMPurchased"/>
+        <sequenceFlow id="flow10" sourceRef="sendVGMPurchased" targetRef="throwVGMPurchased"/>
 
-        <serviceTask id="notifyShipperVGMPurchased"
-                     name="Notify Shipper VGM Purchased"
-                     flowable:delegateExpression="${edcNotifyDelegate}">
+        <intermediateThrowEvent id="throwVGMPurchased" name="VGM Purchased">
             <extensionElements>
-                <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
-                <flowable:field name="notifyState"      stringValue="VGM_PURCHASED"/>
-                <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                <flowable:executionListener event="start"
+                        delegateExpression="${edcNotifyDelegate}">
+                    <flowable:field name="targetInstanceId" expression="${shipperInstanceId}"/>
+                    <flowable:field name="notifyState"      stringValue="VGM_PURCHASED"/>
+                    <flowable:field name="notifyParams"     expression="${shipperNotifyParams}"/>
+                </flowable:executionListener>
             </extensionElements>
-        </serviceTask>
-        <sequenceFlow id="flow11" sourceRef="notifyShipperVGMPurchased" targetRef="endEvent"/>
+        </intermediateThrowEvent>
+        <sequenceFlow id="flow11" sourceRef="throwVGMPurchased" targetRef="endEvent"/>
 
         <endEvent id="endEvent" name="Workflow Complete"/>
 
@@ -172,65 +176,66 @@
                 <bpmndi:BPMNLabel/>
             </bpmndi:BPMNShape>
 
-            <bpmndi:BPMNShape id="BPMNShape_notifyShipperOrderCreated" bpmnElement="notifyShipperOrderCreated">
-                <dc:Bounds x="486" y="160" width="100" height="80"/>
-                <bpmndi:BPMNLabel/>
+            <bpmndi:BPMNShape id="BPMNShape_throwOrderCreated" bpmnElement="throwOrderCreated">
+                <dc:Bounds x="518" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="494" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_waitToSendTrucker" bpmnElement="waitToSendTrucker">
-                <dc:Bounds x="636" y="160" width="100" height="80"/>
+                <dc:Bounds x="604" y="160" width="100" height="80"/>
                 <bpmndi:BPMNLabel/>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_sendTruckerAnnounced" bpmnElement="sendTruckerAnnounced">
-                <dc:Bounds x="786" y="160" width="100" height="80"/>
+                <dc:Bounds x="754" y="160" width="100" height="80"/>
                 <bpmndi:BPMNLabel/>
             </bpmndi:BPMNShape>
 
-            <bpmndi:BPMNShape id="BPMNShape_notifyShipperTruckerAnnounced" bpmnElement="notifyShipperTruckerAnnounced">
-                <dc:Bounds x="936" y="160" width="100" height="80"/>
-                <bpmndi:BPMNLabel/>
+            <bpmndi:BPMNShape id="BPMNShape_throwTruckerAnnounced" bpmnElement="throwTruckerAnnounced">
+                <dc:Bounds x="904" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="880" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_waitToSendMeasurement" bpmnElement="waitToSendMeasurement">
-                <dc:Bounds x="1086" y="160" width="100" height="80"/>
+                <dc:Bounds x="990" y="160" width="100" height="80"/>
                 <bpmndi:BPMNLabel/>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_sendMeasurementCreated" bpmnElement="sendMeasurementCreated">
-                <dc:Bounds x="1236" y="160" width="100" height="80"/>
+                <dc:Bounds x="1140" y="160" width="100" height="80"/>
                 <bpmndi:BPMNLabel/>
             </bpmndi:BPMNShape>
 
-            <bpmndi:BPMNShape id="BPMNShape_notifyShipperMeasurementCreated" bpmnElement="notifyShipperMeasurementCreated">
-                <dc:Bounds x="1386" y="160" width="100" height="80"/>
-                <bpmndi:BPMNLabel/>
+            <bpmndi:BPMNShape id="BPMNShape_throwMeasurementCreated" bpmnElement="throwMeasurementCreated">
+                <dc:Bounds x="1290" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="1266" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_waitPurchaseVGM" bpmnElement="waitPurchaseVGM">
-                <dc:Bounds x="1536" y="182" width="36" height="36"/>
-                <bpmndi:BPMNLabel><dc:Bounds x="1512" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
+                <dc:Bounds x="1376" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="1352" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_taskProcessPayment" bpmnElement="taskProcessPayment">
-                <dc:Bounds x="1622" y="160" width="100" height="80"/>
+                <dc:Bounds x="1462" y="160" width="100" height="80"/>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_taskCreateCertificate" bpmnElement="taskCreateCertificate">
-                <dc:Bounds x="1772" y="160" width="100" height="80"/>
+                <dc:Bounds x="1612" y="160" width="100" height="80"/>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_sendVGMPurchased" bpmnElement="sendVGMPurchased">
-                <dc:Bounds x="1922" y="160" width="100" height="80"/>
+                <dc:Bounds x="1762" y="160" width="100" height="80"/>
             </bpmndi:BPMNShape>
 
-            <bpmndi:BPMNShape id="BPMNShape_notifyShipperVGMPurchased" bpmnElement="notifyShipperVGMPurchased">
-                <dc:Bounds x="2072" y="160" width="100" height="80"/>
+            <bpmndi:BPMNShape id="BPMNShape_throwVGMPurchased" bpmnElement="throwVGMPurchased">
+                <dc:Bounds x="1912" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="1888" y="225" width="84" height="27"/></bpmndi:BPMNLabel>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNShape id="BPMNShape_endEvent" bpmnElement="endEvent">
-                <dc:Bounds x="2222" y="182" width="36" height="36"/>
-                <bpmndi:BPMNLabel><dc:Bounds x="2200" y="225" width="80" height="14"/></bpmndi:BPMNLabel>
+                <dc:Bounds x="1998" y="182" width="36" height="36"/>
+                <bpmndi:BPMNLabel><dc:Bounds x="1976" y="225" width="80" height="14"/></bpmndi:BPMNLabel>
             </bpmndi:BPMNShape>
 
             <bpmndi:BPMNEdge id="BPMNEdge_flow0" bpmnElement="flow0">
@@ -240,43 +245,43 @@
                 <di:waypoint x="286" y="200"/><di:waypoint x="336" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow2" bpmnElement="flow2">
-                <di:waypoint x="436" y="200"/><di:waypoint x="486" y="200"/>
+                <di:waypoint x="436" y="200"/><di:waypoint x="518" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow2b" bpmnElement="flow2b">
-                <di:waypoint x="586" y="200"/><di:waypoint x="636" y="200"/>
+                <di:waypoint x="554" y="200"/><di:waypoint x="604" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow3" bpmnElement="flow3">
-                <di:waypoint x="736" y="200"/><di:waypoint x="786" y="200"/>
+                <di:waypoint x="704" y="200"/><di:waypoint x="754" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow4" bpmnElement="flow4">
-                <di:waypoint x="886" y="200"/><di:waypoint x="936" y="200"/>
+                <di:waypoint x="854" y="200"/><di:waypoint x="904" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow4b" bpmnElement="flow4b">
-                <di:waypoint x="1036" y="200"/><di:waypoint x="1086" y="200"/>
+                <di:waypoint x="940" y="200"/><di:waypoint x="990" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow5" bpmnElement="flow5">
-                <di:waypoint x="1186" y="200"/><di:waypoint x="1236" y="200"/>
+                <di:waypoint x="1090" y="200"/><di:waypoint x="1140" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow6" bpmnElement="flow6">
-                <di:waypoint x="1336" y="200"/><di:waypoint x="1386" y="200"/>
+                <di:waypoint x="1240" y="200"/><di:waypoint x="1290" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow6b" bpmnElement="flow6b">
-                <di:waypoint x="1486" y="200"/><di:waypoint x="1536" y="200"/>
+                <di:waypoint x="1326" y="200"/><di:waypoint x="1376" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow7" bpmnElement="flow7">
-                <di:waypoint x="1572" y="200"/><di:waypoint x="1622" y="200"/>
+                <di:waypoint x="1412" y="200"/><di:waypoint x="1462" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow8" bpmnElement="flow8">
-                <di:waypoint x="1722" y="200"/><di:waypoint x="1772" y="200"/>
+                <di:waypoint x="1562" y="200"/><di:waypoint x="1612" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow9" bpmnElement="flow9">
-                <di:waypoint x="1872" y="200"/><di:waypoint x="1922" y="200"/>
+                <di:waypoint x="1712" y="200"/><di:waypoint x="1762" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow10" bpmnElement="flow10">
-                <di:waypoint x="2022" y="200"/><di:waypoint x="2072" y="200"/>
+                <di:waypoint x="1862" y="200"/><di:waypoint x="1912" y="200"/>
             </bpmndi:BPMNEdge>
             <bpmndi:BPMNEdge id="BPMNEdge_flow11" bpmnElement="flow11">
-                <di:waypoint x="2172" y="200"/><di:waypoint x="2222" y="200"/>
+                <di:waypoint x="1948" y="200"/><di:waypoint x="1998" y="200"/>
             </bpmndi:BPMNEdge>
 
         </bpmndi:BPMNPlane>
