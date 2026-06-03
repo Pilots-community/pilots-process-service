@@ -10,6 +10,7 @@ import org.flowable.engine.runtime.Execution;
 import org.flowable.engine.runtime.ExecutionQuery;
 import org.flowable.engine.runtime.ProcessInstance;
 import org.flowable.engine.runtime.ProcessInstanceQuery;
+import org.flowable.eventsubscription.api.EventSubscriptionQuery;
 import org.flowable.task.api.Task;
 import org.flowable.task.api.TaskQuery;
 import org.flowable.variable.api.history.HistoricVariableInstance;
@@ -169,6 +170,13 @@ class ServiceInstanceControllerTest {
         when(taskService.createTaskQuery()).thenReturn(mockTaskQuery);
         when(mockTaskQuery.processInstanceId(flowableId)).thenReturn(mockTaskQuery);
         when(mockTaskQuery.singleResult()).thenReturn(null);
+
+        // --- No message event subscription (process is at a plain receiveTask) ---
+        EventSubscriptionQuery mockSubQuery = mock(EventSubscriptionQuery.class);
+        when(runtimeService.createEventSubscriptionQuery()).thenReturn(mockSubQuery);
+        when(mockSubQuery.processInstanceId(flowableId)).thenReturn(mockSubQuery);
+        when(mockSubQuery.eventType("message")).thenReturn(mockSubQuery);
+        when(mockSubQuery.singleResult()).thenReturn(null);
 
         // --- Execution query chain (receiveTask waiting execution) ---
         Execution mockExecution = mock(Execution.class);
@@ -500,6 +508,13 @@ class ServiceInstanceControllerTest {
         when(taskService.createTaskQuery()).thenReturn(mockTaskQuery);
         when(mockTaskQuery.processInstanceId(flowableId)).thenReturn(mockTaskQuery);
         when(mockTaskQuery.singleResult()).thenReturn(null);
+
+        // No message event subscription
+        EventSubscriptionQuery mockSubQuery = mock(EventSubscriptionQuery.class);
+        when(runtimeService.createEventSubscriptionQuery()).thenReturn(mockSubQuery);
+        when(mockSubQuery.processInstanceId(flowableId)).thenReturn(mockSubQuery);
+        when(mockSubQuery.eventType("message")).thenReturn(mockSubQuery);
+        when(mockSubQuery.singleResult()).thenReturn(null);
 
         ExecutionQuery mockExecQuery = mock(ExecutionQuery.class);
         when(runtimeService.createExecutionQuery()).thenReturn(mockExecQuery);

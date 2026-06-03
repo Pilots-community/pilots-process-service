@@ -51,7 +51,12 @@
 
         <serviceTask id="sendPurchaseVGM"
                      name="Send Purchase VGM"
-                     flowable:delegateExpression="${invokeInternalApiDelegate}"/>
+                     flowable:delegateExpression="${httpPostDelegate}">
+            <extensionElements>
+                <flowable:field name="url"     expression="${internalApiUrl}"/>
+                <flowable:field name="payload" expression="${payloadData}"/>
+            </extensionElements>
+        </serviceTask>
         <sequenceFlow id="flow4" sourceRef="sendPurchaseVGM" targetRef="waitVGMPurchased"/>
 
         <intermediateCatchEvent id="waitVGMPurchased" name="Wait for VGM Purchased">

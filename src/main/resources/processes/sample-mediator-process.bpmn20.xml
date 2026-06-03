@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample Mediator Process
+  Process ID: sample-service-process
+
+  Minimal process used by MediatorProcessIntegrationTest.
+
+  Flow:
+    Start -> ServiceTask (POST to internalApiUrl) -> ReceiveTask (waitForInternalAppReply) -> End
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xmlns:flowable="http://flowable.org/bpmn"
+             xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+             xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+             xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+             targetNamespace="https://example.com/sample">
+
+    <process id="sample-service-process"
+             name="Sample Mediator Process"
+             isExecutable="true">
+
+        <startEvent id="startEvent" name="Start"/>
+        <sequenceFlow id="flow1" sourceRef="startEvent" targetRef="notifyInternalApp"/>
+
+        <serviceTask id="notifyInternalApp"
+                     name="Notify Internal App"
+                     flowable:delegateExpression="${httpPostDelegate}">
+            <extensionElements>
+                <flowable:field name="url"     expression="${internalApiUrl}"/>
+                <flowable:field name="payload" expression="${payloadData}"/>
+            </extensionElements>
+        </serviceTask>
+        <sequenceFlow id="flow2" sourceRef="notifyInternalApp" targetRef="waitForInternalAppReply"/>
+
+        <receiveTask id="waitForInternalAppReply" name="Wait for Internal App Reply"/>
+        <sequenceFlow id="flow3" sourceRef="waitForInternalAppReply" targetRef="endEvent"/>
+
+        <endEvent id="endEvent" name="End"/>
+
+    </process>
+
+    <bpmndi:BPMNDiagram id="BPMNDiagram_sample">
+        <bpmndi:BPMNPlane id="BPMNPlane_sample" bpmnElement="sample-service-process">
+
+            <bpmndi:BPMNShape id="BPMNShape_startEvent" bpmnElement="startEvent">
+                <dc:Bounds x="100" y="182" width="36" height="36"/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_notifyInternalApp" bpmnElement="notifyInternalApp">
+                <dc:Bounds x="186" y="160" width="100" height="80"/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_waitForInternalAppReply" bpmnElement="waitForInternalAppReply">
+                <dc:Bounds x="336" y="160" width="100" height="80"/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNShape id="BPMNShape_endEvent" bpmnElement="endEvent">
+                <dc:Bounds x="486" y="182" width="36" height="36"/>
+            </bpmndi:BPMNShape>
+
+            <bpmndi:BPMNEdge id="BPMNEdge_flow1" bpmnElement="flow1">
+                <di:waypoint x="136" y="200"/><di:waypoint x="186" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow2" bpmnElement="flow2">
+                <di:waypoint x="286" y="200"/><di:waypoint x="336" y="200"/>
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="BPMNEdge_flow3" bpmnElement="flow3">
+                <di:waypoint x="436" y="200"/><di:waypoint x="486" y="200"/>
+            </bpmndi:BPMNEdge>
+
+        </bpmndi:BPMNPlane>
+    </bpmndi:BPMNDiagram>
+
+</definitions>

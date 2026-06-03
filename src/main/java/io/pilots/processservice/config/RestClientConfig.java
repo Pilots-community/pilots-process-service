@@ -1,6 +1,8 @@
 package io.pilots.processservice.config;
 
-import io.pilots.processservice.delegate.InvokeInternalApiDelegate;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.pilots.processservice.delegate.EdcNotifyDelegate;
+import io.pilots.processservice.delegate.HttpPostDelegate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
@@ -13,21 +15,13 @@ public class RestClientConfig {
         return builder.build();
     }
 
-    /** Default delegate — reads {@code internalApiUrl} + {@code payloadData}. */
     @Bean
-    public InvokeInternalApiDelegate invokeInternalApiDelegate(RestClient restClient) {
-        return new InvokeInternalApiDelegate(restClient);
+    public HttpPostDelegate httpPostDelegate(RestClient restClient) {
+        return new HttpPostDelegate(restClient);
     }
 
-    /** Trucker-announcement delegate — reads {@code truckerApiUrl} + {@code truckerPayload}. */
     @Bean
-    public InvokeInternalApiDelegate invokeTruckerApiDelegate(RestClient restClient) {
-        return new InvokeInternalApiDelegate(restClient, "truckerApiUrl", "truckerPayload");
-    }
-
-    /** Measurement delegate — reads {@code measurementApiUrl} + {@code measurementPayload}. */
-    @Bean
-    public InvokeInternalApiDelegate invokeMeasurementApiDelegate(RestClient restClient) {
-        return new InvokeInternalApiDelegate(restClient, "measurementApiUrl", "measurementPayload");
+    public EdcNotifyDelegate edcNotifyDelegate(RestClient restClient, ObjectMapper objectMapper) {
+        return new EdcNotifyDelegate(restClient, objectMapper);
     }
 }
