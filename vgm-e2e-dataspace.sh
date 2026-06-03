@@ -126,6 +126,9 @@ P2_PS="${P2_PS:-http://localhost:8081}"
 P1_DP="${P1_DP:-http://localhost:38185/public}"
 P2_DP="${P2_DP:-http://localhost:48185/public}"
 
+# Internal Docker hostname for P2 data-plane (used by certiweightVGMProcess to auto-notify Shipper)
+P2_DP_INTERNAL="${P2_DP_INTERNAL:-http://participant-2-dataplane:48185/public}"
+
 # Internal ERP/TMS stub target (http-receiver container — replace with real URLs in production)
 ERP_URL="${ERP_URL:-http://http-receiver:4000/erp}"
 TMS_URL="${TMS_URL:-http://http-receiver:4000/tms}"
@@ -360,7 +363,7 @@ hdr "Section 3 — VGM business flow"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Step 1: Shipper's VGM request (already created by the Shipper via frontend) ──
-step "Step 1 of 5 — Shipper's VGM request  [created in the frontend]"
+step "Step 1 — Shipper's VGM request  [created in the frontend]"
 party P2 "Has submitted a VGM request for container ${CONTAINER_NR}"
 flow_in "Shipper's process instance (P2 — ${P2_PS})" "$SHIP_PARAMS"
 ok "Container: ${CONTAINER_NR}   Booking: ${BOOKING_NR}   State: STARTED"
@@ -370,7 +373,7 @@ next "Certiweight receives the order — its ERP is notified and a weighing job 
      "Direct call (Certiweight's own process service)"
 
 # ── Step 2: Certiweight creates process instance ───────────────────────────────
-step "Step 2 of 5 — Certiweight creates a weighing job  [CERTIWEIGHT SIDE]"
+step "Step 1 — Certiweight creates a weighing job  [CERTIWEIGHT SIDE]"
 party P1 "Creating certiweightVGMProcess instance for container ${CONTAINER_NR} …"
 CERT_BODY="{\"serviceDefinition\":\"certiweightVGMProcess\",
     \"stakeholders\":[
@@ -382,7 +385,9 @@ CERT_BODY="{\"serviceDefinition\":\"certiweightVGMProcess\",
       \"bookingNr\":\"${BOOKING_NR}\",
       \"containernr\":\"${CONTAINER_NR}\",
       \"bookingnr\":\"${BOOKING_NR}\",
-      \"shipperInstanceId\":\"${SHIP_ID}\"
+      \"shipperInstanceId\":\"${SHIP_ID}\",
+      \"edcDataPlaneUrl\":\"${P2_DP_INTERNAL}\",
+      \"edcBearerToken\":\"${P2_TOKEN}\"
     }}"
 flow_out "POST ${P1_PS}/serviceInstances" "$CERT_BODY"
 CERT_RESP=$(ps_post "${P1_PS}" "$CERT_BODY")
@@ -390,111 +395,80 @@ flow_in "Certiweight's process instance (P1 — ${P1_PS})" "$CERT_RESP"
 CERT_ID=$(echo "$CERT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 ok "Certiweight weighing job created: ${CERT_ID}"
 ok "Process is paused — waiting for Certiweight ERP to trigger the order notification"
+ok "EDC bearer token embedded in process — Shipper will be auto-notified at each step"
 
 next "Certiweight ERP sends the order notification to its internal system" \
-     "Certiweight ERP → Certiweight process service (direct PATCH)"
+     "Certiweight ERP → Certiweight process service (direct PATCH) — Shipper auto-notified via EDC"
 
 # ── Step 2a: Certiweight ERP triggers sendOrderCreated ────────────────────────
-step "Step 2a — Certiweight ERP: send order created notification"
+step "Step 2 of 4 — Certiweight ERP: send order created notification"
 party P1 "ERP triggers sendOrderCreated for container ${CONTAINER_NR} …"
 RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "1" "ORDER_CREATED" \
   "{\"internalApiUrl\":\"${ERP_URL}/order-created\",
-    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"bookingNr\\\":\\\"${BOOKING_NR}\\\"}\"}")
+    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"bookingNr\\\":\\\"${BOOKING_NR}\\\"}\",
+    \"shipperNotifyParams\":\"{\\\"certiweightInstanceId\\\":\\\"${CERT_ID}\\\",\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\"}\"}")
 flow_in "Certiweight process updated" "$RESP"
 notification "Certiweight ERP" "Order Created" "Container ${CONTAINER_NR} / Booking ${BOOKING_NR}"
 ok "Order created notification delivered (version $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
-
-next "Certiweight notifies the Shipper that the order has been confirmed" \
-     "EDC data-plane — Certiweight → Shipper (policy-governed, bearer token)"
-
-# ── Step 2b: Certiweight → Shipper ORDER_CONFIRMED (via EDC) ──────────────────
-step "Step 2b — Order confirmed: Certiweight notifies Shipper  [EDC]"
-party P1 "Sending ORDER_CONFIRMED to Shipper through the dataspace …"
-RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
-  "${SHIP_ID}" "1" "ORDER_CONFIRMED" \
-  "{\"certiweightInstanceId\":\"${CERT_ID}\",\"containerNr\":\"${CONTAINER_NR}\"}")
-ok "Shipper received: ORDER_CONFIRMED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
+ok "Shipper auto-notified ORDER_CONFIRMED via EDC data-plane (edcNotifyDelegate)"
 party P2 "Shipper is now waiting for the trucker to be announced"
 
 next "Truck TRK-42 arrives at the facility — Certiweight ERP sends trucker announcement" \
-     "Certiweight ERP → Certiweight process service (direct PATCH)"
+     "Certiweight ERP → Certiweight process service (direct PATCH) — Shipper auto-notified via EDC"
 
 # ── Step 3a: Certiweight ERP triggers sendTruckerAnnounced ────────────────────
-step "Step 3a — Certiweight ERP: send trucker announcement"
+step "Step 3 of 4 — Certiweight ERP: send trucker announcement"
 party P1 "ERP triggers sendTruckerAnnounced — truck TRK-42 at facility …"
 RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "2" "TRUCKER_ANNOUNCED" \
   "{\"truckerApiUrl\":\"${ERP_URL}/trucker-announced\",
-    \"truckerPayload\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"truckId\\\":\\\"TRK-42\\\"}\"}")
+    \"truckerPayload\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"truckId\\\":\\\"TRK-42\\\"}\",
+    \"shipperNotifyParams\":\"{\\\"transportbedrijf\\\":\\\"${TRANSPORT_CO}\\\"}\"}")
 flow_in "Certiweight process updated" "$RESP"
 notification "Certiweight ERP" "Trucker Announced" "Truck TRK-42 announced for container ${CONTAINER_NR}"
 ok "Trucker announcement delivered (version $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
-
-next "Certiweight notifies the Shipper that the trucker has arrived" \
-     "EDC data-plane — Certiweight → Shipper (policy-governed, bearer token)"
-
-# ── Step 3b: Certiweight → Shipper TRUCKER_ANNOUNCED (via EDC) ────────────────
-step "Step 3b — Trucker announced: Certiweight notifies Shipper  [EDC]"
-party P1 "Sending TRUCKER_ANNOUNCED to Shipper through the dataspace …"
-RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
-  "${SHIP_ID}" "2" "TRUCKER_ANNOUNCED" \
-  "{\"transportbedrijf\":\"${TRANSPORT_CO}\"}")
-ok "Shipper received: TRUCKER_ANNOUNCED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
+ok "Shipper auto-notified TRUCKER_ANNOUNCED via EDC data-plane (edcNotifyDelegate)"
 party P2 "Shipper sees the trucker has arrived — waiting for weight measurement"
 
 next "Container weighed — Certiweight ERP sends the measurement to its internal system" \
-     "Certiweight ERP → Certiweight process service (direct PATCH)"
+     "Certiweight ERP → Certiweight process service (direct PATCH) — Shipper auto-notified via EDC"
 
 # ── Step 4a: Certiweight ERP triggers sendMeasurementCreated ──────────────────
-step "Step 4a — Certiweight ERP: send weight measurement"
+step "Step 4 of 4 — Certiweight ERP: send weight measurement"
 party P1 "ERP triggers sendMeasurementCreated — gross mass 24 500 kg …"
+SHIP_NOTIFY_PARAMS_MC=$(python3 -c "
+import json
+params = {
+    'internalApiUrl': '${TMS_URL}/purchase-vgm',
+    'payloadData': json.dumps({'containerNr': '${CONTAINER_NR}', 'grossMass': 24500})
+}
+print(json.dumps(json.dumps(params)))
+")
 RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "3" "MEASUREMENT_CREATED" \
   "{\"measurementApiUrl\":\"${ERP_URL}/measurement-created\",
-    \"measurementPayload\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"grossMass\\\":24500,\\\"unit\\\":\\\"kg\\\"}\"}")
+    \"measurementPayload\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"grossMass\\\":24500,\\\"unit\\\":\\\"kg\\\"}\",
+    \"shipperNotifyParams\":${SHIP_NOTIFY_PARAMS_MC}}")
 flow_in "Certiweight process updated" "$RESP"
 notification "Certiweight ERP" "Measurement Created" "Container ${CONTAINER_NR} — Gross mass: 24 500 kg"
 ok "Measurement delivered (version $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
+ok "Shipper auto-notified MEASUREMENT_RECEIVED via EDC data-plane (edcNotifyDelegate)"
+notification "Shipper TMS" "Purchase VGM" "Container ${CONTAINER_NR} — measurement received, triggering purchase"
 ok "Certiweight is now waiting for the Shipper to confirm the VGM purchase"
 
-next "Certiweight sends the weight measurement to the Shipper for VGM purchase confirmation" \
-     "EDC data-plane — Certiweight → Shipper (policy-governed, bearer token)"
-
-# ── Step 4b: Certiweight → Shipper MEASUREMENT_RECEIVED (via EDC) ─────────────
-step "Step 4b — Measurement shared: Certiweight notifies Shipper  [EDC]"
-party P1 "Sending MEASUREMENT_RECEIVED (24 500 kg) to Shipper through the dataspace …"
-RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
-  "${SHIP_ID}" "3" "MEASUREMENT_RECEIVED" \
-  "{\"internalApiUrl\":\"${TMS_URL}/purchase-vgm\",
-    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"grossMass\\\":24500}\"}")
-ok "Shipper received: MEASUREMENT_RECEIVED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
-notification "Shipper TMS" "Purchase VGM" "Container ${CONTAINER_NR} — measurement received, weight withheld"
-ok "Shipper is now waiting for the VGM certificate"
-
 next "Certiweight ERP processes the VGM purchase on its own platform" \
-     "Certiweight ERP → Certiweight process service (direct PATCH)"
+     "Certiweight ERP → Certiweight process service (direct PATCH) — Shipper auto-notified via EDC"
 
 # ── Step 4: Certiweight ERP processes payment (advance waitPurchaseVGM directly) ──
-step "Step 4 of 5 — Certiweight ERP: payment processed  [CERTIWEIGHT SIDE]"
+step "Certiweight ERP: payment processed — issuing certificate  [CERTIWEIGHT SIDE]"
 party P1 "ERP confirms VGM payment processed — issuing certificate CERT-2026-001 …"
 RESP=$(ps_patch "${P1_PS}" "${CERT_ID}" "4" "PURCHASE_CONFIRMED" \
   "{\"internalApiUrl\":\"${ERP_URL}/vgm-purchased\",
-    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\"}")
+    \"payloadData\":\"{\\\"containerNr\\\":\\\"${CONTAINER_NR}\\\",\\\"certificateRef\\\":\\\"CERT-2026-001\\\"}\",
+    \"shipperNotifyParams\":\"{\\\"grossMass\\\":24500,\\\"certificateRef\\\":\\\"CERT-2026-001\\\",\\\"certificateUrl\\\":\\\"https://certiweight.example.com/certs/CERT-2026-001.pdf\\\"}\"}")
 flow_in "Certiweight process updated" "$RESP"
 notification "Certiweight ERP" "VGM Certificate Issued" "Certificate: CERT-2026-001 — Payment processed"
 ok "Certiweight payment processed (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
 ok "Certiweight weighing process is now COMPLETE"
-
-next "Certiweight delivers the VGM certificate to the Shipper" \
-     "EDC data-plane — Certiweight → Shipper (policy-governed, bearer token)"
-
-# ── Step 5: Certiweight ERP → Shipper (advance waitVGMPurchased via EDC) ─────────
-step "Step 5 of 5 — Certificate delivered: Certiweight notifies Shipper  [EDC]"
-party P1 "Sending VGM_PURCHASED (certificate CERT-2026-001) to Shipper through the dataspace …"
-RESP=$(edc_patch "${P2_DP}" "${P2_TOKEN}" \
-  "${SHIP_ID}" "4" "VGM_PURCHASED" \
-  "{\"grossMass\":24500,
-    \"certificateRef\":\"CERT-2026-001\",
-    \"certificateUrl\":\"https://certiweight.example.com/certs/CERT-2026-001.pdf\"}")
-ok "Shipper received: VGM_PURCHASED (version $(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"))"
+ok "Shipper auto-notified VGM_PURCHASED via EDC data-plane (edcNotifyDelegate)"
 notification "Shipper TMS" "VGM Certificate Downloaded" "CERT-2026-001  |  https://certiweight.example.com/certs/CERT-2026-001.pdf"
 ok "Shipper VGM process is now COMPLETE"
 

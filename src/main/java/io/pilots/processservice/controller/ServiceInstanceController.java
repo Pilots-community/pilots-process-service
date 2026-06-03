@@ -246,6 +246,41 @@ public class ServiceInstanceController implements ServiceInstancesApi {
         return ResponseEntity.noContent().build();
     }
 
+    @org.springframework.web.bind.annotation.PostMapping("/serviceInstances/{id}/advance")
+    public ResponseEntity<Void> advanceServiceInstance(
+            @org.springframework.web.bind.annotation.PathVariable("id") UUID id,
+            @org.springframework.web.bind.annotation.RequestBody(required = false) Map<String, Object> body) {
+
+        ProcessInstance pi = runtimeService.createProcessInstanceQuery()
+                .processInstanceBusinessKey(id.toString())
+                .singleResult();
+
+        if (pi == null) return ResponseEntity.notFound().build();
+
+        String flowableId = pi.getId();
+        Map<String, Object> updates = new HashMap<>();
+
+        if (body != null) {
+            Object params = body.get("parameters");
+            if (params instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> paramMap = (Map<String, Object>) params;
+                updates.putAll(paramMap);
+            }
+            Object state = body.get("state");
+            if (state != null) {
+                updates.put("_state", state.toString());
+            }
+        }
+
+        int newVersion = readVersion(runtimeService.getVariables(flowableId)) + 1;
+        updates.put("_version", newVersion);
+        runtimeService.setVariables(flowableId, updates);
+        advanceProcess(flowableId);
+
+        return ResponseEntity.ok().build();
+    }
+
     @org.springframework.web.bind.annotation.GetMapping("/serviceInstances/{id}/currentActivities")
     public ResponseEntity<Map<String, Object>> getCurrentActivities(
             @org.springframework.web.bind.annotation.PathVariable("id") UUID id) {
